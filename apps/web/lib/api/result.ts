@@ -62,6 +62,19 @@ export async function readJson(request: Request): Promise<unknown | typeof UNREA
   }
 }
 
+/** Too many requests from one caller. `Retry-After` tells them when to come back. */
+export function tooBusy(retryAfterSeconds: number): Response {
+  const body: Result<never> = {
+    ok: false,
+    reason: 'busy',
+    message: 'Too many attempts. Please wait a moment and try again.',
+  };
+  return Response.json(body, {
+    status: 429,
+    headers: { 'retry-after': String(retryAfterSeconds) },
+  });
+}
+
 /** Authenticated replies carry personal data and must never sit in a shared cache. */
 export const PRIVATE: ResponseInit = {
   headers: { 'cache-control': 'no-store, private', vary: 'authorization' },

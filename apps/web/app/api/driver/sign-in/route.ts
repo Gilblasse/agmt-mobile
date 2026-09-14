@@ -2,7 +2,8 @@ import { and, desc, eq, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/lib/db';
 import { driverSignInCodes, drivers, notifications } from '@/lib/db/schema';
-import { fail, ok, readJson, UNREADABLE, withResult } from '@/lib/api/result';
+import { fail, ok, readJson, tooBusy, UNREADABLE, withResult } from '@/lib/api/result';
+import { callerKey, consume } from '@/lib/api/rate-limit';
 import { hashCode, newSignInCode } from '@/lib/auth/tokens';
 
 /**
@@ -39,6 +40,16 @@ const SignIn = z
 const SENT = { sent: true } as const;
 
 export const POST = withResult(async (request: Request) => {
+  // Before anything else, and before touching the database for a lookup: this
+  // endpoint answers strangers by design, so it is the one that has to be
+  // cheap to refuse.
+  // 30 in ten minutes. A depot full of drivers shares one public IP over the
+  // building's WiFi, so this has to clear a whole crew starting a shift while
+  // still stopping a sustained sweep. Per-driver flooding is already bounded
+  // by the 60-second cooldown; this limit is about the caller, not the driver.
+  const within = await consume(`sign-in:${callerKey(request)}`, 30, 600);
+  if (!within.allowed) return tooBusy(within.retryAfterSeconds);
+
   const body = await readJson(request);
   if (body === UNREADABLE) return fail('validation', 'The request body was not readable JSON.');
 

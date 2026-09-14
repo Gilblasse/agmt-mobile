@@ -5,6 +5,14 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 
 ## Done
 
+- **Rate limiting on the unauthenticated endpoints** — fixed-window counters in
+  the database (migration 0003), 30 per ten minutes per caller on each of
+  `sign-in` and `verify`, answering `busy` with `Retry-After`. Verified: an
+  attacker naming a driver gets 30 attempts then refusal for ten minutes, while
+  the driver signs in normally from their own address.
+  *Residual:* an attacker spread across many addresses is still only bounded by
+  the per-driver cooldown. Recorded as an observation, not scheduled.
+
 - **Monorepo with shared rules** (Phase 1) — `packages/rules` shared by
   `apps/web` and `apps/mobile` via an exports map over compiled output; Bun
   workspaces; CI running the parity harness. Verified: see `verification.md`.
@@ -16,15 +24,6 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
   every request. 17 integration tests against real PostgreSQL, in CI.
 
 ## Next
-
-- **Rate limiting on the unauthenticated endpoints** [must, before any real
-  driver uses this] — `sign-in` and `verify` need a per-caller limit, not just
-  the per-driver cooldown and per-code attempt cap that exist now. Knowing only
-  a driver's name (or phone, in any punctuation), a stranger can burn each code
-  as it is issued and keep that driver locked out; the per-driver controls
-  bound the rate but cannot tell the driver and the attacker apart.
-  *Acceptance:* a caller exceeding the limit gets `busy`; a test proves a third
-  party cannot indefinitely deny sign-in to a driver they can name.
 
 - **The rest of the API** (Phase 2) — remaining `contract.ts` endpoints behind
   the same envelope. Next most useful: `getDriverDay`, then `setDriverProgress`
@@ -51,6 +50,13 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 - **Dispatcher board** (Phase 6), then the office subset in the app.
 
 ## Observations (not scheduled work)
+
+- Rate limiting is keyed on `x-forwarded-for`, which is caller-controlled
+  unless a trusted proxy rewrites it. Whatever this deploys behind must be
+  configured to overwrite that header, or the limit is advisory. Assess when
+  hosting is chosen.
+- Fixed windows allow up to 2× the limit across a window boundary. Accepted:
+  these limits stop sustained abuse rather than meter precisely.
 
 - Both app entry screens duplicate the same sample `quote(...)` call. Throwaway
   scaffolding; assess when the real screens replace them.

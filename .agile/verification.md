@@ -95,6 +95,26 @@ Demonstrated end to end by hand as well: request → outbox message → verify �
 authorised `/api/driver/me` → driver marked inactive → same token refused with
 "This account is no longer active."
 
+## Rate limiting
+
+5 tests, all passing, plus the 26 sign-in tests re-run as a regression.
+
+Covered: a caller flooding `sign-in` or `verify` is refused with `busy` and a
+`Retry-After`; limits are per caller, so one attacker does not lock out anyone
+else; the two endpoints have separate budgets, so exhausting sign-in still
+lets a driver use a code they already hold; and 45 simultaneous requests are
+all counted — a read-modify-write counter would lose hits under exactly the
+concurrency the limit exists to stop.
+
+Demonstrated by hand: an attacker naming a driver gets 30 attempts, then 15
+straight refusals with `retry-after: 599`, while the real driver on a
+different address requests a code and signs in normally.
+
+**Found while doing this:** the first limits (10 per ten minutes) broke 18 of
+the 26 sign-in tests, because they all shared one caller bucket. That is not
+only a test artefact — a depot of drivers on one WiFi shares a public IP too.
+Limits were raised to 30 and the reasoning written where they are set.
+
 ## CI
 
 Every `bun run` step in `.github/workflows/ci.yml` was run locally with the same

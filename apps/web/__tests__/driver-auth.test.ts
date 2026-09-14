@@ -18,8 +18,21 @@ const BASE = process.env.BASE_URL ?? 'http://localhost:3000';
 const sql = postgres(process.env.DATABASE_URL!);
 
 type Json = Record<string, any>;
+
+/**
+ * A fresh caller address per request. These tests are about authentication,
+ * not throttling, and they deliberately make far more attempts than any real
+ * driver would — sharing one address would have them refused as a flood.
+ * Rate limiting has its own suite.
+ */
+let caller = 0;
+const nextCaller = () => `198.51.100.${(caller++ % 250) + 1}`;
+
 async function call(path: string, init?: RequestInit): Promise<{ status: number; body: Json }> {
-  const res = await fetch(`${BASE}${path}`, init);
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers: { 'x-forwarded-for': nextCaller(), ...(init?.headers as Record<string, string>) },
+  });
   return { status: res.status, body: (await res.json()) as Json };
 }
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -54,6 +67,7 @@ before(async () => {
     ON CONFLICT (name) DO UPDATE SET active = true`;
 });
 beforeEach(async () => {
+  await sql`DELETE FROM rate_limits WHERE bucket LIKE '%:198.51.100.%'`;
   await sql`DELETE FROM notifications WHERE driver_id IN (SELECT id FROM drivers WHERE name IN (${ACTIVE}, ${INACTIVE}))`;
   await sql`DELETE FROM driver_sign_in_codes WHERE driver_id IN (SELECT id FROM drivers WHERE name IN (${ACTIVE}, ${INACTIVE}))`;
   await sql`DELETE FROM driver_sessions WHERE driver_id IN (SELECT id FROM drivers WHERE name IN (${ACTIVE}, ${INACTIVE}))`;

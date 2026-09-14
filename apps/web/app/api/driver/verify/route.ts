@@ -2,7 +2,8 @@ import { and, eq, gt, isNull, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/lib/db';
 import { driverSessions, driverSignInCodes, drivers } from '@/lib/db/schema';
-import { fail, ok, PRIVATE, readJson, UNREADABLE, withResult } from '@/lib/api/result';
+import { fail, ok, PRIVATE, readJson, tooBusy, UNREADABLE, withResult } from '@/lib/api/result';
+import { callerKey, consume } from '@/lib/api/rate-limit';
 import { codeMatches, hashToken, newSessionToken } from '@/lib/auth/tokens';
 import { revokeSessionsBeyondLimit, SESSION_TTL_DAYS } from '@/lib/auth/driver';
 
@@ -38,6 +39,16 @@ const Verify = z
 const REFUSED = 'That code is wrong or has expired. Ask for a new one.';
 
 export const POST = withResult(async (request: Request) => {
+  // Before anything else, and before touching the database for a lookup: this
+  // endpoint answers strangers by design, so it is the one that has to be
+  // cheap to refuse.
+  // Typing a code is a once-per-sign-in act, and a driver who fumbles it twice
+  // still only needs a handful. 30 in ten minutes clears a shared-IP crew and
+  // still closes the burn-and-re-request loop that made the five-attempt cap
+  // bypassable.
+  const within = await consume(`verify:${callerKey(request)}`, 30, 600);
+  if (!within.allowed) return tooBusy(within.retryAfterSeconds);
+
   const body = await readJson(request);
   if (body === UNREADABLE) return fail('validation', 'The request body was not readable JSON.');
 
