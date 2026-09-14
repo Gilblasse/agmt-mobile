@@ -10,14 +10,16 @@ review pass is mandatory rather than optional.
 maintainable TypeScript application, without losing a driver's tap or
 mispricing a trip.
 
-**Iteration goal (Phase 2, first slice):** driver sign-in end to end — one-time
-code, verified session, and an authorized request — against real PostgreSQL.
+**Iteration goal (autonomous):** make sign-in usable end to end — the outbox
+worker — then the Running Late notice and the recorded contract/envelope debt.
 
-**Status:** Phase 1 delivered, pushed, CI green. Phase 2 first slice
-implemented and locally verified (17/17 integration tests); independent review
-pending.
+**Status:** outbox worker, Running Late, contract alignment and envelope
+coverage all implemented and locally verified (96 tests). Independent review
+running at the time of writing; its findings and their dispositions are in
+`review-findings.md`.
 
-**Next action:** collect the review, resolve findings, push.
+**Next action:** plug in an SMS provider — the only thing between a driver and
+signing in — and schedule the drain.
 
 **Resolved:** the owner confirmed the repo is public as-is, knowing it carries
 the live Apps Script deployment URL and spreadsheet IDs. Rotating that

@@ -183,6 +183,43 @@ Demonstrated by hand end to end: sign in, open the day, tap all five steps,
 re-send an already-delivered tap five times (5 events recorded, not 10), then
 drain a stale tap which is ignored with the trip left at COMPLETE.
 
+## The notification outbox
+
+9 tests. A queued message is sent once and marked sent; with no provider it
+stays `pending` with the reason recorded, rather than looking delivered; a
+failure backs off and is not picked up again until it is due; five attempts
+abandons it while keeping the row and its last error; a permanent failure
+abandons at once; a message not yet due is left alone; one bad message does
+not stop the others; oldest goes first.
+
+**The concurrency test earned its place immediately.** Four overlapping drains
+against ten messages sent **22** of them before claiming became a lease —
+exactly the "driver told twice" failure the outbox exists to prevent. Now ten
+messages, ten sends, no duplicates.
+
+Demonstrated by hand: a driver requests a code, it queues, the drain claims it
+and reports `no delivery provider configured`, the message stays `pending`, and
+the code still works. The job endpoint returns 401 without the secret and with
+a wrong one.
+
+## Running Late
+
+6 tests. The phone's "minutes away" becomes a time on the office clock; an
+office note already on the trip survives the append; two taps leave **one**
+warning on the board but **two** entries in the trail; a reason containing
+markup is stripped to words; a nonsense offset is refused; another driver's
+trip is refused.
+
+## Every answer is the envelope
+
+An unknown `/api` path returns `404 application/json` with `reason:
+not-found`, and a wrong method returns `405 application/json` — both returned
+non-JSON before, which crashes a client that always parses the body.
+
+## The day version
+
+Stable across two identical reads, and changes on a tap and on a new trip.
+
 ## CI
 
 Every `bun run` step in `.github/workflows/ci.yml` was run locally with the same

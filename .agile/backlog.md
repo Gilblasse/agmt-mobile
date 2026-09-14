@@ -5,6 +5,16 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 
 ## Done
 
+- **Running Late notice** [must] — `POST /api/driver/trips/:id/eta`. The phone
+  sends minutes; the office's clock turns it into a time on the board. Reason
+  stripped to plain words, warning deduped on the trip, every report kept in
+  the trail.
+- **Contract drift closed** — `contract.ts` matches what was built
+  (`driverVerify` identifiers, `driverSignIn` name, `getDriverDay` timeZone /
+  readOnly / version, `reportEta` reason and note). Parity re-run: unaffected.
+- **Every answer is the envelope** — an unknown `/api` path and a wrong method
+  both returned non-JSON, which crashes a client that always parses JSON.
+
 - **Notification outbox worker** — claims due messages under a lease, retries
   with back-off, gives up after five attempts keeping the row and its last
   error, and drains behind a secret-gated job endpoint. Delivery itself is a
@@ -37,6 +47,17 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
   20 integration tests.
 
 ## Next
+
+- **Plug in an SMS provider** [must, blocks everything] — the outbox sends
+  nothing until a `Sender` exists. Needs the `docs/06` decision. Twilio is the
+  documented recommendation; the seam is `apps/web/lib/notifications/sender.ts`
+  and `useSender()`.
+  *Acceptance:* a real code reaches a real phone, and a provider failure leaves
+  the message queued rather than lost.
+
+- **Schedule the drain** — the worker exists and the endpoint is gated, but
+  nothing calls it on a timer yet. A platform cron hitting
+  `POST /api/jobs/drain-outbox` every minute with `CRON_SECRET`.
 
 - **The rest of the API** (Phase 2) — remaining `contract.ts` endpoints behind
   the same envelope. Next most useful: `getDriverDay`, then `setDriverProgress`
