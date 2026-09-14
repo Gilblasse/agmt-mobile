@@ -3,6 +3,7 @@ import { after, beforeEach, describe, it } from 'node:test';
 import postgres from 'postgres';
 import { drainOutbox } from '@/lib/notifications/outbox';
 import { unconfiguredSender, useSender, type Message, type Sent } from '@/lib/notifications/sender';
+import { twilioSender } from '@/lib/notifications/twilio';
 
 /**
  * The outbox worker, against a real database.
@@ -227,5 +228,59 @@ describe('draining the outbox', () => {
     // made this flake whenever another suite left a row behind.
     const mine = seen.map((m) => m.body).filter((b) => b === 'first' || b === 'second');
     assert.deepEqual(mine, ['first', 'second']);
+  });
+});
+
+describe('with Twilio behind the outbox', () => {
+  /** A stand-in for Twilio's HTTP endpoint. Everything up to it is the real thing. */
+  function twilioAnswering(reply: () => Response) {
+    const requests: URLSearchParams[] = [];
+    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      requests.push(new URLSearchParams(String(init?.body ?? '')));
+      return reply();
+    }) as unknown as typeof fetch;
+    useSender(
+      twilioSender({
+        accountSid: 'AC_test',
+        authToken: 'secret',
+        from: '+15550001111',
+        fetch: fetchImpl,
+      }),
+    );
+    return requests;
+  }
+
+  it('sends a queued sign-in code as a text and marks it sent', async () => {
+    const id = await queue('123456 is your Amazing Grace sign-in code.');
+    const requests = twilioAnswering(() => new Response('{"sid":"SM1"}', { status: 201 }));
+
+    const result = await drainOutbox();
+    assert.equal(result.delivered, 1);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]!.get('To'), '+18455550000', 'the stored number became E.164');
+    assert.match(requests[0]!.get('Body') ?? '', /123456/);
+    assert.equal((await stateOf(id)).state, 'sent');
+  });
+
+  it('keeps the message when Twilio is having a bad day', async () => {
+    const id = await queue('keep me');
+    twilioAnswering(() => new Response('{"code":20500,"message":"internal error"}', { status: 500 }));
+
+    await drainOutbox();
+    const row = await stateOf(id);
+    assert.equal(row.state, 'pending', 'queued for a retry, not thrown away');
+    assert.match(row.last_error, /20500/);
+  });
+
+  it('stops trying when the driver has replied STOP', async () => {
+    const id = await queue('they unsubscribed');
+    twilioAnswering(() => new Response('{"code":21610,"message":"unsubscribed"}', { status: 400 }));
+
+    await drainOutbox();
+    const row = await stateOf(id);
+    assert.equal(row.state, 'abandoned', 'no point retrying four more times');
+    assert.equal(row.attempts, 1);
+    // The office needs to be able to find out why a driver was never told.
+    assert.match(row.last_error, /21610/);
   });
 });

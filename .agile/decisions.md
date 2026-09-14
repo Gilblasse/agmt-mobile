@@ -195,3 +195,38 @@ claimed the sign-in codes another suite was waiting on. `--test-concurrency=1`.
 `--test-force-exit` is also needed: a top-level `after` cannot close the
 connection pool that is keeping the event loop alive, because it only runs when
 the loop ends.
+
+## Twilio for text messages, chosen by the owner
+
+`docs/06` recommended it and the owner confirmed. No SDK: the Messages API is
+one authenticated form POST, and calling it with `fetch` keeps the dependency
+surface small and the transport injectable, so the whole path is exercised in
+tests without an account or a bill.
+
+**Only the recipient being wrong is permanent.** The outbox *abandons* a
+message it is told is permanent, so a wrong verdict is a sign-in code a driver
+never receives. Invalid number, replied STOP, landline, region not enabled —
+those are permanent. A rotated token, a rate limit, an outage are not: they are
+the office's to fix, and abandoning every queued code because a credential
+changed would be the worse failure.
+
+## The sender is resolved where it is used, not installed at boot
+
+An earlier version called `configureSending()` from `instrumentation.ts`. The
+startup log printed "Twilio" and the drain reported "no delivery provider
+configured" and sent nothing — Next bundles instrumentation separately from
+route handlers, so a value assigned to a module variable at startup is simply
+not there when a route runs.
+
+`instrumentation.ts` now only *reports* what the environment describes. The
+sender itself is built on first use in whichever bundle needs it. Module-level
+mutable state is not a way to pass configuration between the two.
+
+## Email still has no provider
+
+Twilio sends text messages. Email needs a separate service and separate
+credentials, and `docs/07` makes two channels a `[should]`, not a `[must]`. An
+email message reports that no provider is configured rather than disappearing
+into a sender that cannot carry it. A driver with no phone number on file
+therefore cannot receive a code — the office has to notice, because sign-in
+deliberately tells every caller the same thing.

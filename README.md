@@ -56,6 +56,32 @@ comparisons**, in about 40 seconds.
 If it fails, the rewrite has drifted from the system that is currently sending
 invoices. Run it after any change to `pricing.ts` or `drivers.ts`.
 
+## Sending messages
+
+Sign-in codes and driver alerts queue in the `notifications` table. Nothing
+sends inline — the old system did, and a driver was sometimes told twice, or
+not at all with no record either way.
+
+Two things have to be true before a driver can actually sign in:
+
+1. **A provider is configured.** Set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`
+   and `TWILIO_FROM` (see `.env.example`). Without all three the server logs
+   `no delivery provider configured` at boot and messages stay queued.
+2. **Something drains the queue.** Point a scheduler at
+   `POST /api/jobs/drain-outbox` every minute with `CRON_SECRET` as a bearer
+   token. On Vercel that is a cron entry; anywhere else, a timer.
+
+Check which provider is live by reading the line the server prints at startup:
+
+```
+[notifications] sms: Twilio (account AC1234…, from +15551234567); email: none
+```
+
+Email has no provider yet, so a driver with no phone number on file cannot be
+sent a code. They are still told a code was sent — telling an anonymous caller
+otherwise would turn sign-in into a way to read the roster — so the office has
+to notice. See `docs/06-external-services.md`.
+
 ## The non-negotiables
 
 Each one is a production failure that has already happened. `CLAUDE.md` has the

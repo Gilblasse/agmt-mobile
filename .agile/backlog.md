@@ -5,6 +5,12 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 
 ## Done
 
+- **Twilio for text messages** — adapter, failure classification, E.164
+  normalisation of roster numbers, and boot-time reporting of which provider is
+  live. Proven end to end against a stand-in endpoint: request → queued →
+  drained → API call → marked sent → driver signs in with the texted code.
+  *Not verified:* any real delivery. No message has left this system.
+
 - **Running Late notice** [must] — `POST /api/driver/trips/:id/eta`. The phone
   sends minutes; the office's clock turns it into a time on the board. Reason
   stripped to plain words, warning deduped on the trip, every report kept in
@@ -48,12 +54,17 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 
 ## Next
 
-- **Plug in an SMS provider** [must, blocks everything] — the outbox sends
-  nothing until a `Sender` exists. Needs the `docs/06` decision. Twilio is the
-  documented recommendation; the seam is `apps/web/lib/notifications/sender.ts`
-  and `useSender()`.
-  *Acceptance:* a real code reaches a real phone, and a provider failure leaves
-  the message queued rather than lost.
+- **Send a real message through the real Twilio** [must, before any driver] —
+  the adapter is built and proven against a stand-in endpoint, but **no message
+  has ever left this system**. Needs a Twilio account, a number, and the three
+  environment variables. Watch for: a trial account can only text verified
+  numbers; the roster's numbers must be textable (a landline abandons with
+  21614); and check the sending number's region.
+  *Acceptance:* a driver receives a code on a real phone and signs in with it.
+
+- **Email delivery** [should] — Twilio carries text only, so a driver with no
+  phone number on file cannot receive a code and the office is not told. Needs
+  a transactional email provider behind the same `Sender` interface.
 
 - **Schedule the drain** — the worker exists and the endpoint is gated, but
   nothing calls it on a timer yet. A platform cron hitting

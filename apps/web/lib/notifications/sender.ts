@@ -1,3 +1,4 @@
+import { twilioSender } from './twilio';
 /**
  * How a message actually leaves the building.
  *
@@ -56,12 +57,83 @@ export const unconfiguredSender: Sender = {
   },
 };
 
-let current: Sender = unconfiguredSender;
+let installed: Sender | null = null;
 
+/** Replaces the sender. For tests; production reads the environment. */
 export function useSender(sender: Sender): void {
-  current = sender;
+  installed = sender;
 }
 
+/** Forgets an explicitly installed sender, so the next call re-reads the environment. */
+export function resetSender(): void {
+  installed = null;
+}
+
+/**
+ * The sender to use now.
+ *
+ * Resolved on first use rather than installed at boot. Next bundles
+ * `instrumentation.ts` separately from route handlers, so a sender assigned to
+ * a module variable during startup is simply not there when a route runs — the
+ * startup log said Twilio while the drain reported no provider and sent
+ * nothing. Reading the environment where it is needed is correct under any
+ * bundling.
+ */
 export function sender(): Sender {
-  return current;
+  if (!installed) installed = fromEnvironment();
+  return installed;
+}
+
+/**
+ * Builds the sender described by the environment.
+ *
+ * Text messages go to Twilio, per `docs/06-external-services.md`. Email has no
+ * provider yet, so an email message says so plainly rather than disappearing
+ * into a sender that cannot carry it. A partial configuration is treated as no
+ * configuration: half-configured must never look ready.
+ */
+function fromEnvironment(env: SendingEnv = process.env): Sender {
+  const accountSid = env.TWILIO_ACCOUNT_SID;
+  const authToken = env.TWILIO_AUTH_TOKEN;
+  const from = env.TWILIO_FROM;
+  if (!accountSid || !authToken || !from) return unconfiguredSender;
+
+  const sms = twilioSender({
+    accountSid,
+    authToken,
+    from,
+    defaultCountryCode: env.SMS_DEFAULT_COUNTRY_CODE ?? '1',
+    ...(env.TWILIO_BASE_URL ? { baseUrl: env.TWILIO_BASE_URL } : {}),
+  });
+
+  const described = `sms: ${sms.describe()}; email: none`;
+  return {
+    describe: () => described,
+    async send(message) {
+      if (message.channel !== 'sms') {
+        return {
+          delivered: false,
+          error: `No provider is configured for ${message.channel}. See docs/06-external-services.md.`,
+        };
+      }
+      return sms.send(message);
+    },
+  };
+}
+
+export type SendingEnv = Partial<
+  Record<
+    | 'TWILIO_ACCOUNT_SID'
+    | 'TWILIO_AUTH_TOKEN'
+    | 'TWILIO_FROM'
+    | 'SMS_DEFAULT_COUNTRY_CODE'
+    | 'TWILIO_BASE_URL',
+    string
+  >
+> &
+  Record<string, string | undefined>;
+
+/** What the environment describes, without installing it. For the startup log. */
+export function describeConfiguredSender(env: SendingEnv = process.env): string {
+  return fromEnvironment(env).describe();
 }
