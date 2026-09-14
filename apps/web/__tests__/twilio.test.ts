@@ -1,16 +1,23 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { twilioSender, toE164 } from '@/lib/notifications/twilio';
+import { checkBaseUrl, toE164, twilioSender } from '@/lib/notifications/twilio';
 import { describeConfiguredSender, resetSender, useSender } from '@/lib/notifications/sender';
-import type { Message } from '@/lib/notifications/sender';
+import type { Message, Sent } from '@/lib/notifications/sender';
+
+/** Narrows a result to a refusal, failing the test if the message was accepted. */
+function refusal(result: Sent): Extract<Sent, { accepted: false }> {
+  assert.equal(result.accepted, false, 'expected a refusal, not an acceptance');
+  return result as Extract<Sent, { accepted: false }>;
+}
 
 /**
  * The Twilio adapter, driven through a fake transport.
  *
  * Nothing here reaches the network. What is being checked is the part that
- * decides a driver's fate: whether a failure is permanent. The outbox
- * *abandons* a message it is told is permanent, so a wrong verdict here is a
- * sign-in code the driver never receives.
+ * decides a driver's fate: which number a message goes to, whether a failure
+ * is permanent, and whether "Twilio took it" is allowed to be recorded as
+ * "the driver got it". Each of those has been wrong once, and each wrong
+ * answer is a sign-in code somebody else received, threw away, or never had.
  */
 
 const text: Message = {
@@ -32,17 +39,18 @@ function fakeTwilio(answer: Response | ((req: Request) => Response | Promise<Res
     });
     return typeof answer === 'function'
       ? answer(new Request(String(url), init as RequestInit))
-      : answer;
+      : answer.clone();
   }) as unknown as typeof fetch;
   return { calls, fetchImpl };
 }
 
-const accepted = () => new Response(JSON.stringify({ sid: 'SM123', status: 'queued' }), { status: 201 });
-const refused = (code: number, message: string, status = 400) =>
+const queued = () =>
+  new Response(JSON.stringify({ sid: 'SM123', status: 'queued' }), { status: 201 });
+const refused = (code: number | string, message: string, status = 400) =>
   new Response(JSON.stringify({ code, message }), { status });
 
 describe('turning a stored number into one Twilio will take', () => {
-  it('assumes the local country for a plain ten-digit number', () => {
+  it('reads a local number as belonging to the region the office is in', () => {
     assert.equal(toE164('8455550101'), '+18455550101');
     assert.equal(toE164('(845) 555-0101'), '+18455550101');
     assert.equal(toE164('845-555-0101'), '+18455550101');
@@ -51,30 +59,74 @@ describe('turning a stored number into one Twilio will take', () => {
   it('leaves a number that already says where it is alone', () => {
     // Prefixing a country code onto an international number would send the
     // message somewhere else entirely.
-    assert.equal(toE164('+447700900123'), '+447700900123');
+    assert.equal(toE164('+442079460101'), '+442079460101');
     assert.equal(toE164('+1 845 555 0101'), '+18455550101');
   });
 
-  it('accepts a country code other than the default', () => {
-    assert.equal(toE164('07700900123', '44'), null, 'eleven digits not starting with 44');
-    assert.equal(toE164('7700900123', '44'), '+447700900123');
+  it('takes a region, not a dialling prefix', () => {
+    // A prefix cannot do this job, and the arithmetic version proved it: a
+    // London number written the way Londoners write it — 2079460101 — became
+    // +12079460101, which is a real number in Maine, and a stranger received
+    // a driver's sign-in code. The 11-digit rule was worse still: it only
+    // worked at all for a one-character country code, so setting the prefix
+    // to 44 applied it twice.
+    assert.equal(toE164('2079460101', 'GB'), '+442079460101');
+    assert.equal(toE164('07911123456', 'GB'), '+447911123456');
+    assert.equal(toE164('+447911123456', 'GB'), '+447911123456');
   });
 
-  it('refuses what is not a number rather than guessing', () => {
-    for (const bad of ['', 'ask the office', '12345', '000']) {
+  it('refuses digits that are not a number in that region', () => {
+    // 13800138000 is a Chinese mobile written without its country code. The
+    // arithmetic version made it +13800138000 — a real number in Ohio.
+    assert.equal(toE164('13800138000'), null);
+    for (const bad of ['', 'ask the office', '12345', '000', '845555010']) {
       assert.equal(toE164(bad), null, `${bad} should be refused`);
     }
+  });
+
+  it('does not dial the extension', () => {
+    // Stripping punctuation and keeping every digit turned "x12" into two
+    // more digits on the end, which is a different number.
+    assert.equal(toE164('845-555-0101 x12'), '+18455550101');
+    assert.equal(toE164('(845) 555-0101 ext. 12'), '+18455550101');
+  });
+});
+
+describe('where the messages are sent', () => {
+  const config = { accountSid: 'AC', authToken: 't', from: '+15550001111' };
+
+  it('refuses to carry the token and the codes over plain http', () => {
+    // How the review environment was actually configured. Every request holds
+    // the account's standing auth token and every message holds a sign-in code.
+    assert.throws(() => checkBaseUrl('http://api.example.com'), /must be https/);
+    assert.throws(() => checkBaseUrl('not a url'), /not a URL/);
+    assert.throws(
+      () => twilioSender({ ...config, baseUrl: 'http://api.example.com' }),
+      /must be https/,
+    );
+  });
+
+  it('allows a stand-in on this machine', () => {
+    // Exercising the whole path without a Twilio account is worth keeping.
+    assert.equal(checkBaseUrl('http://127.0.0.1:4010').hostname, '127.0.0.1');
+    assert.equal(checkBaseUrl('http://localhost:4010').hostname, 'localhost');
+    assert.equal(checkBaseUrl('https://api.au1.twilio.com').hostname, 'api.au1.twilio.com');
+  });
+
+  it('refuses a region that is not a country', () => {
+    assert.throws(() => twilioSender({ ...config, defaultRegion: '44' }), /two-letter country/);
+    assert.throws(() => twilioSender({ ...config, defaultRegion: 'ZZ' }), /two-letter country/);
   });
 });
 
 describe('sending a text', () => {
   it('posts the message to the account, with the body and the number', async () => {
-    const { calls, fetchImpl } = fakeTwilio(accepted());
+    const { calls, fetchImpl } = fakeTwilio(queued());
     const result = await twilioSender({
       accountSid: 'AC_test', authToken: 'secret', from: '+15550001111', fetch: fetchImpl,
     }).send(text);
 
-    assert.deepEqual(result, { delivered: true });
+    assert.deepEqual(result, { accepted: true, reference: 'SM123' });
     assert.equal(calls.length, 1);
     assert.match(calls[0]!.url, /Accounts\/AC_test\/Messages\.json$/);
     assert.equal(calls[0]!.body.get('To'), '+18455550101');
@@ -83,16 +135,49 @@ describe('sending a text', () => {
   });
 
   it('uses a messaging service when given one instead of a number', async () => {
-    const { calls, fetchImpl } = fakeTwilio(accepted());
+    const service = 'MG' + 'a'.repeat(32);
+    const { calls, fetchImpl } = fakeTwilio(queued());
     await twilioSender({
-      accountSid: 'AC_test', authToken: 'secret', from: 'MG_service', fetch: fetchImpl,
+      accountSid: 'AC_test', authToken: 'secret', from: service, fetch: fetchImpl,
     }).send(text);
-    assert.equal(calls[0]!.body.get('MessagingServiceSid'), 'MG_service');
+    assert.equal(calls[0]!.body.get('MessagingServiceSid'), service);
     assert.equal(calls[0]!.body.get('From'), null);
   });
 
+  it('treats an alphanumeric sender id as a sender, not a service', async () => {
+    // "MGTransport" is a perfectly ordinary alphanumeric sender ID. Matching
+    // on the first two letters sent it as a Messaging Service SID, which
+    // Twilio rejects — so every message failed and nobody could see why.
+    const { calls, fetchImpl } = fakeTwilio(queued());
+    await twilioSender({
+      accountSid: 'AC_test', authToken: 'secret', from: 'MGTransport', fetch: fetchImpl,
+    }).send(text);
+    assert.equal(calls[0]!.body.get('From'), 'MGTransport');
+    assert.equal(calls[0]!.body.get('MessagingServiceSid'), null);
+  });
+
+  it('asks Twilio to report back when there is somewhere to report to', async () => {
+    const { calls, fetchImpl } = fakeTwilio(queued());
+    const twilio = twilioSender({
+      accountSid: 'AC', authToken: 't', from: '+15550001111', fetch: fetchImpl,
+      statusCallbackUrl: 'https://agmt.example/api/notifications/twilio-status',
+    });
+    await twilio.send(text);
+    assert.equal(
+      calls[0]!.body.get('StatusCallback'),
+      'https://agmt.example/api/notifications/twilio-status',
+    );
+    assert.match(twilio.describe(), /delivery confirmed/);
+  });
+
+  it('says plainly when nothing will ever confirm a delivery', async () => {
+    const { fetchImpl } = fakeTwilio(queued());
+    const twilio = twilioSender({ accountSid: 'AC', authToken: 't', from: '+1555', fetch: fetchImpl });
+    assert.match(twilio.describe(), /no status callback/);
+  });
+
   it('never puts the credentials anywhere but the auth header', async () => {
-    const { calls, fetchImpl } = fakeTwilio(accepted());
+    const { calls, fetchImpl } = fakeTwilio(queued());
     const twilio = twilioSender({
       accountSid: 'AC_test', authToken: 'super-secret-token', from: '+15550001111', fetch: fetchImpl,
     });
@@ -105,23 +190,72 @@ describe('sending a text', () => {
   });
 });
 
+describe('accepted is not delivered', () => {
+  const twilio = (fetchImpl: typeof fetch) =>
+    twilioSender({ accountSid: 'AC', authToken: 't', from: '+15550001111', fetch: fetchImpl });
+
+  it('reports only that Twilio has the message, and its reference', async () => {
+    const { fetchImpl } = fakeTwilio(queued());
+    assert.deepEqual(await twilio(fetchImpl).send(text), { accepted: true, reference: 'SM123' });
+  });
+
+  it('does not call a 201 a success when the body says it failed', async () => {
+    // Twilio answers 201 the moment it takes the message, and the body of that
+    // 201 can already say the carrier refused it. Reading `response.ok` as
+    // success recorded a message nobody received as a clean delivery — which
+    // is the exact failure docs/06 gives for abandoning the carrier gateways:
+    // no delivery confirmation.
+    for (const status of ['failed', 'undelivered', 'canceled']) {
+      const { fetchImpl } = fakeTwilio(
+        new Response(JSON.stringify({ sid: 'SM1', status, error_code: 21610 }), { status: 201 }),
+      );
+      const result = await twilio(fetchImpl).send(text);
+      assert.equal(result.accepted, false, `a 201 saying "${status}" is not a delivery`);
+    }
+  });
+
+  it('classifies a failure reported inside a 201 the same as any other', async () => {
+    const stopped = new Response(
+      JSON.stringify({ sid: 'SM1', status: 'failed', error_code: 21610 }), { status: 201 },
+    );
+    const busy = new Response(
+      JSON.stringify({ sid: 'SM1', status: 'failed', error_code: 30001 }), { status: 201 },
+    );
+    assert.equal(refusal(await twilio(fakeTwilio(stopped).fetchImpl).send(text)).permanent, true);
+    assert.notEqual(refusal(await twilio(fakeTwilio(busy).fetchImpl).send(text)).permanent, true);
+  });
+});
+
 describe('deciding whether to try again', () => {
   const twilio = (fetchImpl: typeof fetch) =>
     twilioSender({ accountSid: 'AC', authToken: 't', from: '+15550001111', fetch: fetchImpl });
 
-  it('gives up only when the number itself is wrong', async () => {
+  it('gives up only when this message can never be sent', async () => {
     // Abandoning means the driver never gets the message. It is only right
     // when trying again could not possibly help.
     for (const [code, why] of [
       [21211, 'not a valid number'],
       [21610, 'the driver replied STOP'],
       [21614, 'a landline'],
-      [21408, 'region not enabled'],
+      [21617, 'the body is too long'],
     ] as const) {
       const { fetchImpl } = fakeTwilio(refused(code, why));
-      const result = await twilio(fetchImpl).send(text);
-      assert.equal(result.delivered, false);
-      assert.equal(result.permanent, true, `${code} should be permanent`);
+      assert.equal(refusal(await twilio(fetchImpl).send(text)).permanent, true, `${code} should be permanent`);
+    }
+  });
+
+  it('keeps the message when the problem is a setting somebody can switch on', async () => {
+    // These read like the recipient's fault and are not: both are account
+    // settings in the Twilio console. Listed as permanent, one switch left off
+    // abandoned every queued message on its first attempt — every driver's
+    // sign-in code thrown away over something fixable in a minute.
+    for (const [code, why] of [
+      [21408, 'no permission to send to that region'],
+      [21612, 'this sender cannot reach that number'],
+      [21606, 'the From number cannot send texts'],
+    ] as const) {
+      const { fetchImpl } = fakeTwilio(refused(code, why));
+      assert.notEqual(refusal(await twilio(fetchImpl).send(text)).permanent, true, `${code} must stay retryable`);
     }
   });
 
@@ -133,34 +267,48 @@ describe('deciding whether to try again', () => {
       [20500, 500, 'internal error'],
     ] as const) {
       const { fetchImpl } = fakeTwilio(refused(code, why, status));
-      const result = await twilio(fetchImpl).send(text);
-      assert.equal(result.delivered, false);
-      assert.notEqual(result.permanent, true, `${code} must stay retryable`);
+      assert.notEqual(refusal(await twilio(fetchImpl).send(text)).permanent, true, `${code} must stay retryable`);
     }
+  });
+
+  it('reads an error code whether it arrives as a number or as text', async () => {
+    // Twilio sends numbers from the Messages API and strings on a status
+    // callback. A Set of numbers matched one and not the other, so half the
+    // permanent failures quietly looked unclassified and were retried five
+    // times.
+    const { fetchImpl } = fakeTwilio(refused('21610', 'unsubscribed'));
+    assert.equal(refusal(await twilio(fetchImpl).send(text)).permanent, true);
   });
 
   it('keeps the message when Twilio cannot be reached at all', async () => {
     const fetchImpl = (async () => {
       throw new Error('network unreachable');
     }) as unknown as typeof fetch;
-    const result = await twilio(fetchImpl).send(text);
-    assert.equal(result.delivered, false);
+    const result = refusal(await twilio(fetchImpl).send(text));
     assert.notEqual(result.permanent, true, 'an outage is not the message’s fault');
     assert.match(result.error, /Could not reach Twilio/);
   });
 
   it('refuses a recipient it cannot dial, without calling Twilio', async () => {
-    const { calls, fetchImpl } = fakeTwilio(accepted());
-    const result = await twilio(fetchImpl).send({ ...text, recipient: 'ask the office' });
-    assert.equal(result.delivered, false);
+    const { calls, fetchImpl } = fakeTwilio(queued());
+    const result = refusal(await twilio(fetchImpl).send({ ...text, recipient: 'ask the office' }));
     assert.equal(result.permanent, true);
     assert.equal(calls.length, 0, 'no point asking');
   });
 
+  it('does not write the driver’s number into the error it stores', async () => {
+    // That string goes into notifications.last_error, which is read by
+    // whoever is looking at the queue.
+    const { fetchImpl } = fakeTwilio(queued());
+    const { error } = refusal(await twilio(fetchImpl).send({ ...text, recipient: '845555010' }));
+    assert.doesNotMatch(error, /845555010/, 'the number itself is not in the record');
+    assert.match(error, /0101|\*\*\*/, 'but enough to tell one recipient from another');
+  });
+
   it('does not try to send an email through a text provider', async () => {
-    const { calls, fetchImpl } = fakeTwilio(accepted());
+    const { calls, fetchImpl } = fakeTwilio(queued());
     const result = await twilio(fetchImpl).send({ ...text, channel: 'email', recipient: 'a@b.com' });
-    assert.equal(result.delivered, false);
+    assert.equal(result.accepted, false);
     assert.equal(calls.length, 0);
   });
 });
@@ -186,6 +334,14 @@ describe('choosing a provider from the environment', () => {
     }
   });
 
+  it('says what is wrong instead of taking the process down', async () => {
+    const configured = {
+      TWILIO_ACCOUNT_SID: 'AC', TWILIO_AUTH_TOKEN: 'tok', TWILIO_FROM: '+15550001111',
+      TWILIO_BASE_URL: 'http://api.example.com',
+    };
+    assert.match(describeConfiguredSender(configured), /misconfigured.*https/is);
+  });
+
   it('says plainly that email has no provider', async () => {
     // Built from the environment, not installed globally: the sender is
     // resolved where it is used, because a value set at boot does not reach a
@@ -204,8 +360,28 @@ describe('choosing a provider from the environment', () => {
     const before = sender().describe();
     assert.match(before, /no delivery provider configured/, 'nothing configured in this environment');
     resetSender();
-    useSender({ describe: () => 'explicit', send: async () => ({ delivered: true as const }) });
+    useSender({ describe: () => 'explicit', send: async () => ({ accepted: true as const }) });
     assert.equal(sender().describe(), 'explicit');
     resetSender();
   });
+
+  it('refuses to redirect production’s messages', async () => {
+    // useSender is a module-level global that silently diverts every message
+    // in the process, exported from a file production imports.
+    const was = process.env.NODE_ENV;
+    try {
+      Object.assign(process.env, { NODE_ENV: 'production' });
+      assert.throws(() => useSender(unreachable()), /test seam/);
+      assert.throws(() => resetSender(), /test seam/);
+    } finally {
+      Object.assign(process.env, { NODE_ENV: was });
+    }
+  });
 });
+
+function unreachable() {
+  return {
+    describe: () => 'should never be installed',
+    send: async () => ({ accepted: false as const, error: 'no' }),
+  };
+}

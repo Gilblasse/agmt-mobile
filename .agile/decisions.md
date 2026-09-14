@@ -203,12 +203,54 @@ one authenticated form POST, and calling it with `fetch` keeps the dependency
 surface small and the transport injectable, so the whole path is exercised in
 tests without an account or a bill.
 
-**Only the recipient being wrong is permanent.** The outbox *abandons* a
+**Only a message that can never be sent is permanent.** The outbox *abandons* a
 message it is told is permanent, so a wrong verdict is a sign-in code a driver
-never receives. Invalid number, replied STOP, landline, region not enabled —
-those are permanent. A rotated token, a rate limit, an outage are not: they are
-the office's to fix, and abandoning every queued code because a credential
-changed would be the worse failure.
+never receives. Invalid number, replied STOP, landline, a body Twilio will not
+take — those are permanent. A rotated token, a rate limit, an outage are not:
+they are the office's to fix, and abandoning every queued code because a
+credential changed would be the worse failure.
+
+The first version of this list also held 21408 ("no permission to send to that
+region") and 21612 ("this sender cannot reach that number"). Both read like the
+recipient's fault and neither is: they are account settings, toggled in the
+Twilio console. With them listed as permanent, one switch left off abandoned
+every queued message on its first attempt — every driver's sign-in code thrown
+away over something the office could fix in a minute. The test that now covers
+this is named for the switch, not the code.
+
+## Accepted and delivered are two different facts
+
+Twilio answers `201` the moment it takes a message, and the body of that `201`
+can already say `"status":"failed"`. Reading `response.ok` as success recorded
+a message the carrier had refused as a clean delivery — which is precisely the
+defect `docs/06-external-services.md` gives as the reason for abandoning the
+carrier email gateways: *no delivery confirmation*. Rebuilding on a provider
+and then keeping the same blindness would have been the rewrite's worst joke.
+
+So `Sent` reports `accepted`, never `delivered`, and the queue has a state for
+each: `accepted` means Twilio has it, `sent` means Twilio confirmed the handset
+did. Confirmation arrives on a signed status callback
+(`POST /api/notifications/twilio-status`), matched to the row by the provider's
+own reference. Where no callback URL is configured a message stops at
+`accepted` and the startup line says so in words — the honest answer, rather
+than a state that claims more than is known.
+
+## A phone number is parsed, not assembled from digits
+
+The first version counted digits and glued a country code on: ten digits got
+`+1`, eleven got `+` if they started with the code. It is wrong in three ways,
+and all three were reproduced against live code. A London number written the
+way Londoners write it — `2079460101` — became `+12079460101`, a real number in
+Maine; a stranger received a driver's sign-in code and the outbox recorded a
+clean success. `13800138000` became a real number in Ohio. And the eleven-digit
+rule only worked at all for a one-character country code, so configuring `44`
+applied it twice.
+
+`libphonenumber-js` with a default **region** replaces it. A region (`US`,
+`GB`) is the only thing that can settle what a local number means; a dialling
+prefix cannot. The number must also be *valid* in that region, not merely the
+right length, which is what rejects the Ohio case. Extensions are parsed and
+dropped rather than dialled.
 
 ## The sender is resolved where it is used, not installed at boot
 
@@ -222,11 +264,23 @@ not there when a route runs.
 sender itself is built on first use in whichever bundle needs it. Module-level
 mutable state is not a way to pass configuration between the two.
 
-## Email still has no provider
+## Email has no provider, and that is an unmet requirement
 
 Twilio sends text messages. Email needs a separate service and separate
-credentials, and `docs/07` makes two channels a `[should]`, not a `[must]`. An
-email message reports that no provider is configured rather than disappearing
-into a sender that cannot carry it. A driver with no phone number on file
-therefore cannot receive a code — the office has to notice, because sign-in
-deliberately tells every caller the same thing.
+credentials, and it has neither yet.
+
+**This entry previously justified that by citing `docs/07-feature-checklist.md`
+line 183 — "two delivery channels, either one is enough" — which is a
+`[should]`. That was the wrong line.** Line 182 is the governing one, and it is
+a `[must]`: *"Sign-in code delivery — deliver the one-time sign-in code by text
+and/or email, whichever channel(s) are actually available for that driver."*
+For a driver on the roster with an email address and no phone number, email is
+the channel that is actually available, and there is nothing to send it with.
+So this is a gap in a `[must]`, tracked in the backlog, not a design decision.
+
+What the code does in the meantime is at least honest: an email message reports
+that no provider is configured rather than disappearing into a sender that
+cannot carry it, and the failure does not count against the message's retry
+budget. But the driver still cannot sign in, and sign-in deliberately tells
+every caller the same thing, so the office has no signal either. Until an email
+provider is wired, a driver with no phone number on file is locked out.

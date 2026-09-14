@@ -13,13 +13,18 @@ mispricing a trip.
 **Iteration goal (autonomous):** make sign-in usable end to end — the outbox
 worker — then the Running Late notice and the recorded contract/envelope debt.
 
-**Status:** outbox worker, Running Late, contract binding and envelope
-coverage implemented, independently reviewed, and repaired — four blockers and
-eight major findings, all fixed and re-verified against the reviewer's own
-attacks (`review-findings.md`). 103 tests.
+**Status:** outbox worker, Running Late, contract binding, envelope coverage
+and the Twilio adapter implemented, independently reviewed, and repaired. The
+Twilio round found three blockers, seven major and nine minor findings, all
+under a fully green suite — every one a wrong fact recorded rather than a
+crash: a sign-in code sent to a stranger in Maine, a carrier refusal filed as a
+delivery, and a console switch that would have thrown the whole queue away. All
+fixed and re-verified against the reviewer's own attacks
+(`review-findings.md`). 156 tests.
 
-**Next action:** plug in an SMS provider and schedule the drain. Until then no
-message is delivered and no driver can sign in.
+**Next action:** an email provider (an unmet `[must]`, see the backlog),
+schedule the drain, and one real message through a real Twilio account. Until
+a message actually leaves, no driver can sign in.
 
 **Resolved:** the owner confirmed the repo is public as-is, knowing it carries
 the live Apps Script deployment URL and spreadsheet IDs. Rotating that

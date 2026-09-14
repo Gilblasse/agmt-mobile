@@ -142,3 +142,56 @@ intermittently; it now asserts on its own.
 length check is an oracle; the trip id is parsed from the URL string rather
 than route params; a deduped second ETA does not move `version`; `plainWords`
 is ASCII-only, which is a real limitation for non-English speakers.
+
+## Phase 2, slice 4 — the Twilio adapter (independent review)
+
+Adversarial review of the delivery path, against a running server and a
+stand-in endpoint. Three blockers, seven major findings, nine minor. Every
+blocker was reproduced live by the reviewer before it was reported, and every
+fix below was re-verified by re-running the reviewer's own attack. The suite
+was green before all of it.
+
+| # | Finding | Disposition |
+|---|---|---|
+| B1 | `toE164` glued `+1` onto any ten digits. Proven live: the roster number `2079460101` — a London number, written locally — became `+12079460101`, a real number in Maine. A stranger received a driver's sign-in code and the outbox recorded a clean success. `13800138000` became a real number in Ohio. The eleven-digit rule only worked for a one-character country code, so `SMS_DEFAULT_COUNTRY_CODE=44` applied it twice. | **Fixed** — `libphonenumber-js` with a default *region* (`SMS_DEFAULT_REGION`), and the number must be valid in that region, not merely the right length. Extensions parsed and dropped rather than dialled. Verified: the reverted arithmetic version fails the new region, validity and extension tests. |
+| B2 | `if (response.ok) return { delivered: true }` treated Twilio's `201` as a delivery. Verified: a `201 {"status":"failed","error_code":21610}` was recorded `delivered`. No `StatusCallback`, no webhook — the exact defect `docs/06` cites for abandoning the carrier gateways. | **Fixed** — the `201` body is parsed; a `failed`/`undelivered`/`canceled` inside it is a refusal, classified like any other. `Sent` now reports `accepted`, and the queue distinguishes `accepted` (Twilio has it) from `sent` (Twilio confirmed the handset did), the latter only reachable through the new signed status callback. Verified: the reverted `response.ok` version fails the three new cases. |
+| B3 | 21408 (geographic permissions) and 21612 were in the permanent set. Both are account settings in the console, so one switch left off abandoned every queued message on attempt 1 — violating the file's own stated rule. | **Fixed** — both moved out, along with 21606 (`From` not SMS-capable). 21617/21602 (the body itself) moved in. |
+| M4 | Lease arithmetic: 20 per batch ÷ 4 concurrent × 30s timeout = 150s against a 120s lease. Reproduced 5 duplicate sends at `OUTBOX_LEASE_SECONDS=8`. Only the adapter's private `timeoutMs ?? 10_000` prevented it, and nothing linked or tested that. | **Fixed** — the claim is re-stamped immediately before each send, so the lease only ever has to cover one send whatever the batch size; a row taken back by the sweeper is skipped rather than sent. A load-time assertion now ties the send timeout to the lease. **Verified failing first:** with the re-stamp removed, the new test sends the last message of a batch twice. |
+| M5 | The back-off runs to three hours and a sign-in code lives ten minutes, so the queue would text a driver a code that died while it waited; superseded codes were not cancelled either. | **Fixed** — `notifications.expires_at`, set by the sign-in route. A message past it is abandoned rather than sent, a back-off that would overshoot it abandons instead of scheduling, and issuing a new code abandons any text still queued for the old one. |
+| M6 | `attempts` incremented on claim whatever the cause, so ≈4.5 hours with no provider configured abandoned the whole queue. | **Fixed** — a failure marked `cause: 'configuration'` (no provider, bad API address) hands the attempt back and retries in a minute. A genuine refusal still counts; both directions are tested. |
+| M7 | `decisions.md` justified having no email provider by citing the `[should]` at `docs/07:183`. The governing line is the `[must]` at `:182`. | **Fixed** — the entry is corrected and says plainly that this is an unmet `[must]`; a driver with an email address and no phone cannot sign in. Raised in the backlog. |
+| M8 | `TWILIO_BASE_URL` was unvalidated and undocumented; over `http://` the auth token and every sign-in code went out in clear — as the review environment itself was configured. | **Fixed** — `checkBaseUrl` requires https, allowing plain http only for a stand-in on this machine, and a bad value degrades to a configuration failure rather than taking the process down. Documented. |
+| M9 | `.env.example` and README omitted A2P 10DLC registration, trial restrictions, number capability and geographic permissions — the four things most likely to stop a correct configuration sending anything — and the README pointed at the startup line, which is the diagnostic that lied. | **Fixed** — all four written out, and the README now says explicitly what the startup line can and cannot tell you. |
+
+### Minor — fixed
+
+Extension digits were being appended to the number (`x12` → two more digits);
+config-error codes were retried five times pointlessly; a `code` arriving as a
+string was not matched by the numeric set, so half the permanent failures
+looked unclassified (Twilio sends numbers from the API and strings on a
+callback); the driver's phone number was written unmasked into
+`notifications.last_error`; an alphanumeric sender ID like `MGTransport` was
+misrouted as a Messaging Service SID by `startsWith('MG')` (now `MG` + 32 hex);
+`useSender`/`resetSender` were exported unguarded from a file production
+imports (now throw outside tests); the `201` body was never drained.
+
+### Clean
+
+Credential handling in code — the token is never logged or echoed, and the
+basic-auth encoding is injection-safe; the SMS body content; concurrent
+resolution of `sender()`.
+
+### Disclosed by the reviewer, fixed here
+
+`outbox.test.ts` ran `DELETE FROM notifications` in `beforeEach`. It destroyed
+a pre-existing queued row during the review, and would destroy production data
+if `DATABASE_URL` ever pointed at a live database. The suites now refuse to run
+unless the database name says it is for testing (`__tests__/_db.ts`), and CI's
+database was renamed `agnext_test` to match.
+
+### Not a finding, found while fixing
+
+`sends the oldest first` asserted on the order messages reached the provider.
+Four are sent at once, so that order is a race; the test passed by accident
+with a batch of two. It now drains one at a time and asserts what the outbox
+actually promises — that an older message is never passed over.

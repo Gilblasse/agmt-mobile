@@ -244,8 +244,63 @@ against an already-migrated database (`type "office_role" already exists`) —
 correct for a non-idempotent init migration under `ON_ERROR_STOP=1`, not a
 defect.
 
+## The Twilio repair round
+
+All seven migrations apply clean to an empty database
+(`0001`–`0007`), and `db/smoke.sql` still passes afterwards.
+
+`bun run typecheck` clean. **156 tests, 0 failures, 0 cancelled**, against
+PostgreSQL 16 and a running Next server on the same database.
+
+Three fixes were verified the way the round-3 retrospective requires — the test
+was run against the *unfixed* code and watched to fail:
+
+| Fix | Reverted to | The test that then failed |
+|---|---|---|
+| Phone numbers parsed against a region | the digit-counting `toE164` | `takes a region, not a dialling prefix`, `refuses digits that are not a number in that region`, `does not dial the extension` |
+| Accepted ≠ delivered | `if (response.ok) return { accepted: true }` | `reports only that Twilio has the message`, `does not call a 201 a success when the body says it failed`, `classifies a failure reported inside a 201` |
+| Per-message claim re-stamp | `stillOurs` guard removed | `does not send a message the sweeper handed to somebody else` — the last message of a batch went twice |
+
+The delivery-report endpoint is tested against signatures computed
+independently of the code that checks them: a valid one is accepted, and an
+absent, wrong-token, tampered, short and non-base64 signature are each refused
+403 with the row untouched. Out-of-order and replayed reports cannot move a
+settled message.
+
+The whole path was then run live against a stand-in that answers like Twilio
+*and reports back like Twilio*, signing its callback with the account token:
+
+```
+request  → {"ok":true,"data":{"sent":true}}
+queued   → state=pending, attempts=0, expires_at set
+drain    → claimed 2, accepted 2
+stand-in → To=+18455557788 From=+15550001111
+           Body=431906 is your Amazing Grace sign-in code. It expires in 10 minutes.
+           StatusCallback=http://localhost:3000/api/notifications/twilio-status
+callback → 204, state=sent, provider_ref=SM_standin_1, delivered_at set
+verify   → the driver signs in with the texted code
+```
+
+Two more behaviours confirmed on the same run: asking for a second code
+abandoned the text still queued for the first (`A newer sign-in code was sent
+before this went out.`), and a message past its expiry was given up on without
+being sent — the drain reported `expired: 1` and the stand-in saw nothing.
+
+**Still not verified: any real delivery.** No message has left this system.
+Everything up to the network is proven against a stand-in; nothing past it is.
+The four Twilio console settings that decide whether a message could arrive —
+A2P 10DLC registration, trial restrictions, `TWILIO_FROM` capability,
+geographic permissions — cannot be checked from here at all, which is why the
+README now says what the startup line can and cannot tell you.
+
 ## Not verified
 
 - `expo-sqlite` cold-start with a corrupt row — no offline queue exists yet.
 - Anything needing a device or simulator. The bundles export; they have not
   been launched on a phone.
+- A real Twilio account: a real send, a real status callback arriving over the
+  network, and Twilio's own signature (the scheme is implemented from its
+  specification and tested against an independent implementation of it here,
+  which is not the same as having accepted a genuine request).
+- Email delivery of a sign-in code. There is no provider, which is an unmet
+  `[must]` (`docs/07-feature-checklist.md:182`), not a gap in testing.

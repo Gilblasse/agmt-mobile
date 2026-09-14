@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import postgres from 'postgres';
+import { sql } from './_db';
 
 /**
  * Driver sign-in, end to end, against a real PostgreSQL.
@@ -15,7 +15,6 @@ import postgres from 'postgres';
  */
 
 const BASE = process.env.BASE_URL ?? 'http://localhost:3000';
-const sql = postgres(process.env.DATABASE_URL!);
 
 type Json = Record<string, any>;
 

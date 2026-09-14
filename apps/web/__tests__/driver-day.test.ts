@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import postgres from 'postgres';
 import { randomUUID } from 'node:crypto';
+import { sql } from './_db';
 
 /**
  * The driver's day and the tap flow — the part docs/08 says not to ship
@@ -11,7 +11,6 @@ import { randomUUID } from 'node:crypto';
  */
 
 const BASE = process.env.BASE_URL ?? 'http://localhost:3000';
-const sql = postgres(process.env.DATABASE_URL!);
 
 let caller = 0;
 const nextCaller = () => `198.51.100.${(caller++ % 250) + 1}`;

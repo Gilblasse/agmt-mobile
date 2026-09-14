@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, describe, it } from 'node:test';
-import postgres from 'postgres';
+import { sql } from './_db';
 
 /**
  * Rate limiting on the endpoints that answer strangers.
@@ -10,7 +10,6 @@ import postgres from 'postgres';
  */
 
 const BASE = process.env.BASE_URL ?? 'http://localhost:3000';
-const sql = postgres(process.env.DATABASE_URL!);
 
 const SIGN_IN_LIMIT = 30;
 const VERIFY_LIMIT = 30;

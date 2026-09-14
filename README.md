@@ -62,7 +62,7 @@ Sign-in codes and driver alerts queue in the `notifications` table. Nothing
 sends inline — the old system did, and a driver was sometimes told twice, or
 not at all with no record either way.
 
-Two things have to be true before a driver can actually sign in:
+Three things have to be true before a driver can actually sign in:
 
 1. **A provider is configured.** Set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`
    and `TWILIO_FROM` (see `.env.example`). Without all three the server logs
@@ -70,17 +70,51 @@ Two things have to be true before a driver can actually sign in:
 2. **Something drains the queue.** Point a scheduler at
    `POST /api/jobs/drain-outbox` every minute with `CRON_SECRET` as a bearer
    token. On Vercel that is a cron entry; anywhere else, a timer.
+3. **Twilio itself is set up to send.** Four settings in the console decide
+   whether anything reaches a handset, and none of them are visible from here:
+   A2P 10DLC brand and campaign registration (US 10-digit numbers, takes days,
+   and unregistered traffic is silently filtered), whether the account is
+   still on trial (only verified numbers, and a notice pasted in front of
+   every message), whether `TWILIO_FROM` is SMS-capable at all, and
+   geographic permissions for the countries being texted. `.env.example`
+   spells each one out. These are the likeliest reason a correct
+   configuration sends nothing.
 
-Check which provider is live by reading the line the server prints at startup:
+The line the server prints at startup says what is *configured*:
 
 ```
-[notifications] sms: Twilio (account AC1234…, from +15551234567); email: none
+[notifications] sms: Twilio (account AC1234…, from +15551234567,
+no status callback — delivery is never confirmed); email: none
 ```
+
+**Read it as exactly that and no more.** It is the credentials parsing, not a
+message arriving. It said "Twilio" while the drain was sending nothing at all,
+and it cannot see any of the four console settings above. The only proof is a
+real message to a real handset.
+
+### Knowing whether a message arrived
+
+`docs/06-external-services.md` gives one reason for abandoning the carrier
+email gateways: no delivery confirmation. So the queue distinguishes the two
+facts it used to conflate:
+
+| `notifications.state` | What it means |
+|---|---|
+| `accepted` | Twilio took the message. Nobody knows if the driver has it. |
+| `sent` | Twilio confirmed the handset received it. |
+| `failed` | Twilio reported it undelivered. `last_error` says why. |
+| `abandoned` | Given up on — the number cannot be texted, or the message was no longer worth sending. |
+
+A message only ever gets past `accepted` if `TWILIO_STATUS_CALLBACK_URL` is
+set to this deployment's public URL, so Twilio has somewhere to report to.
+Reports are rejected unless they carry Twilio's signature for that exact URL.
 
 Email has no provider yet, so a driver with no phone number on file cannot be
-sent a code. They are still told a code was sent — telling an anonymous caller
-otherwise would turn sign-in into a way to read the roster — so the office has
-to notice. See `docs/06-external-services.md`.
+sent a code. This is a gap, not a decision: `docs/07-feature-checklist.md:182`
+makes sign-in code delivery a `[must]` by "whichever channel(s) are actually
+available for that driver". They are still told a code was sent — telling an
+anonymous caller otherwise would turn sign-in into a way to read the roster —
+so the office has to notice. See `docs/06-external-services.md`.
 
 ## The non-negotiables
 

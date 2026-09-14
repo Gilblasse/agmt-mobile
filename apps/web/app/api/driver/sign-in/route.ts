@@ -124,6 +124,19 @@ export const POST = withResult(async (request: Request) => {
       .set({ consumedAt: new Date().toISOString() })
       .where(and(eq(driverSignInCodes.driverId, driver.id), sql`consumed_at IS NULL`));
 
+    // And any text still waiting to go out carries one of those dead codes.
+    // Sending it would give the driver a code that cannot sign them in — they
+    // would try it, be told it is wrong, and have no way to know which of the
+    // two texts is the live one. Under a provider outage there could be
+    // several queued at once.
+    await tx.execute(sql`
+      UPDATE notifications
+      SET state = 'abandoned', last_error = 'A newer sign-in code was sent before this went out.'
+      WHERE driver_id = ${driver.id}
+        AND state = 'pending'
+        AND dedupe_key LIKE 'driver-sign-in:%'
+    `);
+
     const [row] = await tx
       .insert(driverSignInCodes)
       .values({ driverId: driver.id, codeHash: hashCode(code), sentTo: recipient, expiresAt })
@@ -139,6 +152,10 @@ export const POST = withResult(async (request: Request) => {
       body: `${code} is your Amazing Grace sign-in code. It expires in ${CODE_TTL_MINUTES} minutes.`,
       // Keyed on the code row, so two codes can never collide on this.
       dedupeKey: `driver-sign-in:${row!.id}`,
+      // The retry back-off runs to three hours; this code is good for ten
+      // minutes. Past that the outbox gives up rather than delivering a code
+      // that expired while it was queued.
+      expiresAt,
     });
   });
 

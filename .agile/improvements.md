@@ -102,3 +102,37 @@ converts the record from history into a constraint.
 Re-running the reviewer's own attack rather than trusting the suite. It is the
 only reason these fixes are known to work: the tests passed before the fixes
 too.
+
+## Round 4 — the Twilio adapter
+
+**What the rule from round 3 was worth.** "A race test must be seen failing
+against the unfixed code before the fix is committed" was followed here, and it
+worked: the claim-re-stamp fix has a test that was run against the code with
+the guard removed and did fail. So did the region and the accepted-vs-delivered
+tests, run against the reverted logic. That is the first round where the
+evidence for a fix is a failure I actually watched rather than a suite I
+trusted.
+
+**What it did not catch.** Four rounds now, and every single blocker has been
+found by the reviewer under a fully green suite. The pattern in this round is
+sharper than "missing tests": all three blockers were cases where the code
+recorded a *fact that was not true* — a number was valid, a message was
+delivered, a failure was permanent — and the tests asserted on the same fact
+the code had invented. `assert.deepEqual(result, { delivered: true })` cannot
+fail when `delivered: true` is what the code returns for everything.
+
+**Improvement for the next iteration:** for any value that claims something
+about the outside world — delivered, valid, permanent, sent — the test must
+assert against a *second, independent* description of that world, not against
+the code's own report. In this round that would have meant asserting the number
+Twilio was actually asked to text (it was), and asserting on the provider's
+stated status rather than on the HTTP code (it was not). Where no second
+description exists, the value must not claim more than it knows: that is what
+renaming `delivered` to `accepted` did, and it is the more reliable fix of the
+two.
+
+**Second improvement:** the test suite's teardown was destroying rows in a
+database it did not own, and it took the reviewer to notice. Any test that
+deletes must first prove it is talking to a database that exists to be
+deleted from. Done here; do it at the start of the next slice that needs a
+new fixture, not after.

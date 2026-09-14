@@ -5,11 +5,15 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 
 ## Done
 
-- **Twilio for text messages** — adapter, failure classification, E.164
-  normalisation of roster numbers, and boot-time reporting of which provider is
-  live. Proven end to end against a stand-in endpoint: request → queued →
-  drained → API call → marked sent → driver signs in with the texted code.
-  *Not verified:* any real delivery. No message has left this system.
+- **Twilio for text messages** — adapter, failure classification, phone
+  numbers parsed against a configured region, delivery confirmation through a
+  signed status callback, and boot-time reporting of which provider is live.
+  Proven end to end against a stand-in endpoint: request → queued → drained →
+  API call → marked accepted → driver signs in with the texted code.
+  *Not verified:* any real delivery. No message has left this system, and the
+  four Twilio console settings that decide whether one could (A2P 10DLC
+  registration, trial restrictions, number capability, geographic permissions)
+  cannot be checked from here.
 
 - **Running Late notice** [must] — `POST /api/driver/trips/:id/eta`. The phone
   sends minutes; the office's clock turns it into a time on the board. Reason
@@ -93,6 +97,27 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
   `docs/mobile-tech-stack-recommendation.md`.
 
 - **Dispatcher board** (Phase 6), then the office subset in the app.
+
+## Next — raised by the Twilio review
+
+- **An email provider** [must] — `docs/07-feature-checklist.md:182` makes
+  sign-in code delivery a `[must]` by "whichever channel(s) are actually
+  available for that driver". A driver on the roster with an email address and
+  no phone number cannot be sent a code today: there is nothing to send it
+  with, and sign-in deliberately tells every caller the same thing, so the
+  office gets no signal either. This is an unmet requirement, not a decision —
+  `decisions.md` previously cited the wrong line to justify it.
+
+- **Schedule the drain** — nothing calls `POST /api/jobs/drain-outbox` yet, so
+  in a real deployment a queued sign-in code would sit there. One cron entry.
+
+- **Send one real message** — needs the owner's Twilio account. Everything up
+  to the network is proven; nothing past it is. Blocked on an account, which
+  is a business decision with a bill attached and is not mine to make.
+
+- **A driver's own sign-in codes are not the only thing in the queue.** Trip
+  alerts (`docs/07:178-182`) are all `[must]` and none are queued yet — the
+  outbox exists and nothing but sign-in writes to it.
 
 ## Observations (not scheduled work)
 

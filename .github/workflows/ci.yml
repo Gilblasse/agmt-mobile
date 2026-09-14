@@ -16,14 +16,18 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: agnext
+          # The name matters: the API suites delete rows wholesale, and they
+          # refuse to run against a database whose name does not say it is for
+          # testing. Pointed at the office's database that is not a test
+          # failure, it is a day's records gone.
+          POSTGRES_DB: agnext_test
         ports: ['5432:5432']
         options: >-
           --health-cmd pg_isready --health-interval 5s
           --health-timeout 5s --health-retries 10
 
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agnext
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agnext_test
       # Not a secret here: no real provider is wired, and the job endpoint
       # refuses to run at all when this is unset, so CI needs a value to
       # exercise the route.
