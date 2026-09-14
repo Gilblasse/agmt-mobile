@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: Arial, sans-serif;
+  }
+
+  .container {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    padding: 16px;
+    box-sizing: border-box;
+  }
+
+  .spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 6px;
+    border: 2px solid #fff;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+    vertical-align: middle;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .email-list {
+    flex-grow: 1;
+    max-height: 180px; /* Roughly fits 6 emails */
+    overflow-y: auto;
+    padding-right: 4px;
+    margin-bottom: 12px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background-color: #fdfdfd;
+  }
+
+  .email-list label {
+    display: block;
+    margin: 6px 0;
+    font-size: 13px;
+    padding-left: 4px;
+  }
+
+  .controls {
+    border-top: 1px solid #ccc;
+    padding-top: 12px;
+    background-color: #fff;
+    position: sticky;
+    bottom: 0;
+    box-shadow: 0 -2px 6px rgba(0, 0, 0, 0.05);
+  }
+
+  label {
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+
+  select {
+    width: 100%;
+    padding: 6px;
+    margin-top: 4px;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+    font-size: 13px;
+  }
+
+  .confirm-row {
+    display: flex;
+    align-items: center;
+    margin-top: 10px;
+  }
+
+  .confirm-row input {
+    margin-right: 6px;
+  }
+
+  .button-row {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 14px;
+  }
+
+  .grant-btn {
+    background-color: #2ecc71;
+    color: white;
+    border: none;
+    padding: 10px 18px;
+    font-size: 14px;
+    font-weight: bold;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.2s ease-in-out;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+  }
+
+  .grant-btn:hover {
+    background-color: #27ae60;
+  }
+
+  .revoke-btn {
+    background-color: #f4f4f4;
+    color: #a94442;
+    border: 1px solid #ccc;
+    padding: 8px 14px;
+    font-size: 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.2s ease-in-out;
+  }
+
+  .revoke-btn:hover {
+    background-color: #e2e2e2;
+  }
+</style>
+
+  </head>
+  <body>
+    <div class="container">
+  <div id="emailList" class="email-list">Loading emails...</div>
+
+  <div class="controls">
+    <label for="permissionType">Access Type:</label>
+    <select id="permissionType">
+      <option value="edit">Edit</option>
+      <option value="view">View</option>
+    </select>
+
+    <div class="confirm-row">
+      <input type="checkbox" id="confirmCheckbox" />
+      <label for="confirmCheckbox">Confirm changes</label>
+    </div>
+
+    <div class="button-row">
+      <button class="grant-btn" onclick="submitAccess()">Grant Access</button>
+      <button class="revoke-btn" onclick="revokeAccess()">Revoke Access</button>
+    </div>
+  </div>
+</div>
+
+
+
+    
+
+    <script>
+      function loadEmails() {
+        google.script.run.withSuccessHandler(function (emails) {
+          const container = document.getElementById("emailList");
+          container.innerHTML = '';
+          emails.forEach(email => {
+            const label = document.createElement("label");
+            label.innerHTML = `<input type="checkbox" value="${email}"> ${email}`;
+            container.appendChild(label);
+          });
+        }).getEmailList();
+      }
+
+    function updateGrantAccessBtnLoading(isLoading) {
+      const btn = document.querySelector('.grant-btn');
+
+      if(isLoading){
+        btn.disabled = true;
+        btn.textContent = 'Loading...';
+          
+        // Optional: Add a spinner
+        btn.innerHTML = `<span class="spinner"></span> Loading...`;
+      }else{
+        btn.innerHTML = `Grant Access`;
+        btn.disabled = false;
+        btn.textContent = 'Grant Access';
+      }
+    }
+
+    function updateRevokeBtnLoading(isLoading) {
+      const btn = document.querySelector('.revoke-btn');
+
+      if(isLoading){
+        btn.disabled = true;
+        btn.textContent = 'Loading...';
+          
+        // Optional: Add a spinner
+        btn.innerHTML = `<span class="spinner"></span> Loading...`;
+      }else{
+        btn.innerHTML = `Revoke Access`;
+        btn.disabled = false;
+        btn.textContent = 'Revoke Access';
+      }
+    }
+
+      function submitAccess() {
+        const selectedEmails = Array.from(document.querySelectorAll("#emailList input:checked")).map(cb => cb.value);
+        const permissionType = document.getElementById("permissionType").value;
+        const isConfirmed = document.getElementById("confirmCheckbox").checked;
+        updateGrantAccessBtnLoading(true)
+
+  if (selectedEmails.length === 0) {
+    updateGrantAccessBtnLoading(false)
+    alert("Please select at least one email.");
+    return;
+  }
+
+  if (!isConfirmed) {
+    updateGrantAccessBtnLoading(false)
+    alert("You must confirm before granting access.");
+    return;
+  }
+
+  // Call server to check who already has access
+  google.script.run.withSuccessHandler((existingAccessList) => {
+    const duplicates = selectedEmails.filter(email => existingAccessList.includes(email));
+
+    if (duplicates.length > 0) {
+      updateGrantAccessBtnLoading(false)
+      alert("The following email(s) already have access:\n\n" + duplicates.map(e => `• ${e}`).join("\n"));
+      return;
+    }
+
+    // Proceed if none already have access
+    google.script.run.withSuccessHandler(() => {
+      updateGrantAccessBtnLoading(false)
+      alert("Access granted and emails sent.");
+      google.script.host.close();
+    }).grantAccessToEmails({ selectedEmails, permissionType });
+
+  }).getCurrentEditorsAndViewers();
+}
+
+
+
+    function revokeAccess() {
+      const selectedEmails = Array.from(document.querySelectorAll("#emailList input:checked")).map(cb => cb.value);
+      const isConfirmed = document.getElementById("confirmCheckbox").checked;
+      updateRevokeBtnLoading(true)
+
+      if (selectedEmails.length === 0) {
+        updateRevokeBtnLoading(false)
+        alert("Please select at least one email.");
+        return;
+      }
+      if (!isConfirmed) {
+        updateRevokeBtnLoading(false)
+        alert("You must confirm before revoking access.");
+        return;
+      }
+
+      google.script.run.withSuccessHandler(existingAccessList => {
+        const missing = selectedEmails.filter(email => !existingAccessList.includes(email));
+
+        if (missing.length > 0) {
+          updateRevokeBtnLoading(false)
+          alert("The following email(s) do not currently have access:\n\n" + missing.map(e => `• ${e}`).join("\n"));
+          return;
+        }
+
+        const formattedList = selectedEmails.map(email => `• ${email}`).join('\n');
+        const confirmed = confirm(`Are you sure you want to revoke access for the following email(s)?\n\n${formattedList}`);
+        if (!confirmed) {
+          updateRevokeBtnLoading(false)
+          return
+        }
+
+        google.script.run.withSuccessHandler(() => {
+          updateRevokeBtnLoading(false)
+          alert("Access revoked and emails notified.");
+          google.script.host.close();
+        }).revokeAccessFromEmails({ selectedEmails });
+
+      }).getCurrentEditorsAndViewers();
+    }
+
+
+      loadEmails();
+    </script>
+  </body>
+</html>

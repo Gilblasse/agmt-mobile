@@ -1,0 +1,105 @@
+<!-- TripFormTemplate.html -->
+<base target="_top">
+<style>
+  * { box-sizing: border-box; }
+  body, html {
+    margin: 0; padding: 0;
+    height: 100%;
+    font-family: 'Segoe UI', sans-serif;
+  }
+
+  .trip-form {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    background-color: #f9f9f9;
+  }
+
+  .header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px;
+    background-color: #fff;
+    border-bottom: 1px solid #ddd;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+
+  .back-button {
+    font-size: 22px;
+    cursor: pointer;
+    color: #1a73e8;
+    font-weight: bold;
+    transition: color 0.2s ease;
+    margin-right: 12px;
+  }
+
+  .back-button:hover {
+    color: #155ab6;
+  }
+
+  .delete-icon {
+    font-size: 20px;
+    cursor: pointer;
+    color: #f44336;
+  }
+
+  h2 {
+    font-size: 20px;
+    margin: 0;
+    flex-grow: 1;
+  }
+
+  .scroll-container {
+    overflow-y: auto;
+    flex-grow: 1;
+    padding: 20px;
+  }
+
+  label {
+    display: block;
+    margin-top: 14px;
+    margin-bottom: 4px;
+    font-size: 14px;
+  }
+
+  .trip-input {
+    width: 100%;
+    padding: 10px;
+    font-size: 15px;
+    border-radius: 10px;
+    border: 1px solid #ccc;
+    background-color: #fff;
+  }
+
+  .row {
+    display: flex;
+    gap: 16px;
+  }
+
+  .col {
+    flex: 1;
+  }
+
+  .save-button {
+    width: 100%;
+    padding: 14px;
+    font-size: 16px;
+    font-weight: 600;
+    background-color: #1a73e8;
+    color: white;
+    border: none;
+    border-top: 1px solid #ccc;
+    cursor: pointer;
+    position: sticky;
+    bottom: 0;
+    z-index: 10;
+  }
+
+  .save-button:hover {
+    background-color: #155ab6;
+  }
+</style>
+<?!= include('loading') ?>

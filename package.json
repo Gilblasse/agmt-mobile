@@ -1,0 +1,22 @@
+{
+  "name": "agmt-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build:rules": "bun run --filter '@ag/rules' build",
+    "verify": "bun run --filter '@ag/rules' verify",
+    "typecheck": "bun run --filter '@ag/web' typecheck && bun run --filter '@ag/mobile' typecheck",
+    "dev:web": "bun run --filter '@ag/web' dev",
+    "dev:mobile": "bun run --filter '@ag/mobile' start",
+    "db:up": "psql -v ON_ERROR_STOP=1 -f db/migrations/0001_init.sql",
+    "db:smoke": "psql -v ON_ERROR_STOP=1 -f db/smoke.sql"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" integrity="sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T" crossorigin="anonymous">
+    
+    <style>
+     .cancelBtn {
+     background-color: #F2F2F2;
+     border:1px solid #F2F2F2;
+     }
+    
+    </style>
+    
+  </head>
+  <body>
+  
+  
+  <div class="btn-group">
+  
+  <select id="selectedDate" onchange="dateList()" class="btn btn-light btn-lg">
+  <option value="Choose">Choose Date...</option> 
+  <? var dispatchSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DISPATCH"); ?>
+  <? var dates =  dispatchSheet.getRange("A2:A100").getValues(); ?>
+  <? var arr = [];?>
+  
+  <? for(var i=0; i<dates.length; i++){ ?>
+      <? arr.push(String(dates[i][0]).slice(0,10)); ?>
+  <? } ?>
+  
+  
+
+ <? var filteredArray = arr.filter(function(item, pos){ ?>
+       <? if(item !== ""){ ?>
+             <? return arr.indexOf(item)== pos; ?>
+       <? } ?>
+     
+ <? }); ?>
+ 
+  <? filteredArray.forEach(function(date){ ?>
+       <option value="<?=date?>"> <?=date?> </option>
+  <? }) ?>
+  </select>
+  
+  
+  
+  
+  <select id="selectedTag" onchange="selectedDriverReset()" class="btn btn-light btn-lg">
+
+  
+ <option value="ChooseDriver">Choose Driver...</option> 
+
+ </select>
+ 
+ 
+ </div>
+ 
+ 
+ 
+ 
+ <br>
+ <br>
+
+ 
+ 
+ <div id="completedMessage"></div>
+<hr/>
+
+
+<button class="btn btn-danger cancelBtn" onmouseup="closeDia()">Cancel</button>
+
+<button id="subBtn" class="btn btn-info" onmouseup="driverList()">Submit Start Time</button>
+
+
+
+
+
+<script>
+  window.closeDia = function() {
+    google.script.host.close();
+  };
+  
+ window.driverList = function() {
+    var selectedDriver = document.getElementById('selectedTag').value;
+    var selectedDate = document.getElementById('selectedDate').value;
+    var submitBtn = document.getElementById('subBtn');
+    var message = document.getElementById('completedMessage');
+    
+    submitBtn.innerText = "sending...";
+    console.log("selectedDriver = "+selectedDriver);
+    console.log("selectedDate = "+selectedDate)
+    
+    google.script.run.withSuccessHandler(function(data){
+    console.log("does error exist: "+data[0]["error"]);
+       
+       if(typeof data[0]["error"] === 'undefined'){
+         var createMessagept1 = "<div style='color:green'>Successfully sent...</div> <br> <strong>Email/SMS:</strong> "+data[0].email+"<br>"
+         var createMessagept2 = "<strong>Start Time:</strong> "+data[0].day+" at "+data[0].start;
+         message.innerHTML = createMessagept1 + createMessagept2;
+       }else{
+         message.innerHTML = "<span style='color:red'>"+data[0].error+"</span>"; 
+       }
+  
+    submitBtn.innerText = "Submit Start Time";
+
+    }).findEmail(selectedDriver,selectedDate);
+  };
+  
+  
+  
+  window.dateList = function(){
+  var selectedDate = document.getElementById('selectedDate').value;
+  var selectedDriver = document.getElementById('selectedTag');
+  var message = document.getElementById('completedMessage');
+
+
+   google.script.run.withSuccessHandler(function(uniqueDriversArry){
+   console.log(uniqueDriversArry)
+   message.innerHTML = "";
+   
+   while (selectedDriver.length > 1) {
+         selectedDriver.remove(selectedDriver.length-1);
+       }
+    uniqueDriversArry.forEach(function(driver){
+    console.log(driver);
+       selectedDriver.insertAdjacentHTML("beforeend", "<option value=\""+driver+"\">"+driver+"</option>");
+    })
+       
+   }).chosenDate(selectedDate)
+  }
+  
+  
+  
+  
+  window.selectedDriverReset = function(){
+    var message = document.getElementById('completedMessage');
+    message.innerHTML = "";
+  }
+
+</script>
+  </body>
+</html>
+
+

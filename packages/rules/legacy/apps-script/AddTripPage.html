@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <?!= include('TripStyles') ?>
+  </head>
+  <body>
+    <?!= include('loading') ?>
+
+    <div class="trip-form">
+      <div class="header-row">
+        <span class="back-button" title="Back" onclick="goBack()">←</span>
+        <h2>Add Trip</h2>
+      </div>
+
+      <?!= include('TripFormFields') ?>
+
+      <button onclick="submitNewTrip()" class="save-button" disabled>➕ Add Trip</button>
+    </div>
+
+    <?!= include('SharedLoaders') ?>
+
+    <script>
+      const initialDate = <?= JSON.stringify(initialDate) ?>;
+      window.__formOptionsPreload = <?!= formOptions || 'null' ?>;
+      let passengerProfiles = {};
+
+      function checkFormValidity() {
+        const requiredFields = document.querySelectorAll('.trip-form [required]');
+        const saveBtn = document.querySelector('.save-button');
+        const allValid = Array.from(requiredFields).every(f => f.value.trim());
+        if (saveBtn) {
+          saveBtn.disabled = !allValid;
+          saveBtn.classList.toggle('disabled', !allValid);
+        }
+      }
+
+      document.addEventListener("DOMContentLoaded", () => {
+        const date = JSON.parse(initialDate) || new Date().toISOString().slice(0, 10);
+        document.getElementById("trip-date").value = date;
+
+        loadTripFormData(); // 🔁 Load dropdowns and cache profiles
+
+        // ⏳ Give time for form fields to render before syncing
+        setTimeout(() => {
+          const name = document.getElementById("trip-passenger").value;
+          if (name) syncPassengerProfile(name);
+        }, 150);
+
+        checkFormValidity();
+        document.querySelectorAll('.trip-form input, .trip-form select, .trip-form textarea').forEach(el => {
+          el.addEventListener('input', checkFormValidity);
+          el.addEventListener('change', checkFormValidity);
+        });
+      });
+
+
+      function goBack() {
+        const date = document.getElementById("trip-date").value;
+        google.script.run.withFailureHandler(handleError).openPassengerTripList(date);
+      }
+
+      function handleError(e) {
+        document.getElementById("loading-overlay").style.display = "none";
+        showToast("⚠️ Error: " + (e.message || e), "error");
+      }
+
+      function addHoursToTime(timeStr, hoursToAdd) {
+        const [hh, mm] = timeStr.split(':');
+        const date = new Date();
+        date.setHours(parseInt(hh), parseInt(mm), 0, 0);
+        date.setHours(date.getHours() + hoursToAdd);
+        return date.toTimeString().slice(0, 5);
+      }
+
+      function toggleReturnTime() {
+        const checkbox = document.getElementById("return-trip-checkbox");
+        const returnTimeInput = document.getElementById("return-trip-time");
+        const returnContainer = document.getElementById("return-time-container");
+
+        if (checkbox.checked) {
+          returnContainer.style.display = "block";
+
+          const mainTime = document.getElementById("trip-time").value || "09:00";
+          returnTimeInput.value = addHoursToTime(mainTime, 4);
+        } else {
+          returnContainer.style.display = "none";
+          returnTimeInput.value = "";
+        }
+      }
+
+      function toggleStandingOrder() {
+        const box = document.getElementById("standing-order-checkbox");
+        const container = document.getElementById("standing-order-container");
+        container.style.display = box.checked ? "block" : "none";
+        if (box.checked) {
+          const rt = document.getElementById("return-trip-checkbox");
+          if (rt && !rt.checked) {
+            rt.checked = true;
+            toggleReturnTime();
+          }
+          const start = document.getElementById("standing-start-date");
+          if (start && !start.value) {
+            start.value = document.getElementById("trip-date").value;
+          }
+        }
+      }
+
+      function toggleCustomDays() {
+        const freq = document.getElementById("standing-frequency").value;
+        const days = document.getElementById("custom-days");
+        days.style.display = ["WEEKLY", "BIWEEKLY", "MONTHLY"].includes(freq)
+          ? "block"
+          : "none";
+        if (days.style.display === "none") {
+          days.querySelectorAll("input[type=checkbox]").forEach(c => (c.checked = false));
+        }
+      }
+
+      function parseLocalDate(dateStr) {
+        if (!dateStr) return new Date(NaN);
+        const [y, m, d] = dateStr.split("-").map(Number);
+        return new Date(y, m - 1, d);
+      }
+
+      const COLUMN = {
+        LOG: {
+          DATE: 0,
+          START_TIME: 1,
+          TIME: 2,
+          PASSENGER: 3,
+          TRANSPORT: 5,
+          PHONE: 6,
+          MEDICAID: 7,
+          INVOICE: 8,
+          PICKUP: 9,
+          TRIP_KEY_ID: 10,
+          IN: 11,
+          DROPOFF: 12,
+          OUT: 14,
+          STATUS: 16,
+          VEHICLE: 17,
+          DRIVER: 20,
+          ID: 23,
+          NOTES: 24,
+          RETURN_OF: 30,
+          RECURRING_ID: 31,
+        },
+      };
+
+      function tripObjectToRowArray(trip) {
+        const row = Array(COLUMN.LOG.RECURRING_ID + 1).fill("");
+        row[COLUMN.LOG.DATE] = trip.date || "";
+        row[COLUMN.LOG.START_TIME] = trip.startTime || "";
+        row[COLUMN.LOG.TIME] = trip.time || "";
+        row[COLUMN.LOG.PASSENGER] = trip.passenger || "";
+        row[COLUMN.LOG.TRANSPORT] = trip.transport || "";
+        row[COLUMN.LOG.PHONE] = trip.phone || "";
+        row[COLUMN.LOG.MEDICAID] = trip.medicaid || "";
+        row[COLUMN.LOG.INVOICE] = trip.invoice || "";
+        row[COLUMN.LOG.PICKUP] = trip.pickup || "";
+        row[COLUMN.LOG.TRIP_KEY_ID] = trip.tripKeyID || "";
+        row[COLUMN.LOG.IN] = trip.in || "";
+        row[COLUMN.LOG.DROPOFF] = trip.dropoff || "";
+        row[COLUMN.LOG.OUT] = trip.out || "";
+        row[COLUMN.LOG.STATUS] = trip.status || "";
+        row[COLUMN.LOG.VEHICLE] = trip.vehicle || "";
+        row[COLUMN.LOG.DRIVER] = trip.driver || "";
+        row[COLUMN.LOG.ID] = trip.id || "";
+        row[COLUMN.LOG.NOTES] = trip.notes || "";
+        row[COLUMN.LOG.RETURN_OF] = trip.returnOf || "";
+        row[COLUMN.LOG.RECURRING_ID] = trip.recurringId || "";
+        return row;
+      }
+
+
+      function generateTripKeyID() {
+        if (crypto.randomUUID) {
+          return crypto.randomUUID();
+        }
+        const bytes = crypto.getRandomValues(new Uint8Array(16));
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0'));
+        return (
+          hex.slice(0, 4).join('') + '-' +
+          hex.slice(4, 6).join('') + '-' +
+          hex.slice(6, 8).join('') + '-' +
+          hex.slice(8, 10).join('') + '-' +
+          hex.slice(10).join('')
+        );
+      }
+
+      function submitNewTrip() {
+        document.getElementById("loading-overlay").style.display = "flex";
+
+        const date = document.getElementById("trip-date").value.trim();
+        let passenger = document.getElementById("trip-passenger").value.trim();
+        passenger = passenger.replace(/\|/g, "");
+
+        if (!date || !passenger) {
+          alert("🚫 Date and Passenger are required.");
+          document.getElementById("loading-overlay").style.display = "none";
+          return;
+        }
+
+        const todayStr = new Date().toISOString().slice(0, 10);
+        if (date < todayStr) {
+          alert("🚫 Cannot add a trip in the past.");
+          document.getElementById("loading-overlay").style.display = "none";
+          return;
+        }
+
+        const time = (document.getElementById("trip-time").value || "23:58").trim();
+        let pickup = (document.getElementById("trip-pickup").value || "").trim();
+        pickup = pickup.replace(/\|/g, "");
+        let dropoff = (document.getElementById("trip-dropoff").value || "").trim();
+        dropoff = dropoff.replace(/\|/g, "");
+        const driver = (document.getElementById("trip-driver").value || "").trim();
+
+        const trip = {
+          id: `${driver}|${date}|${time}|${passenger}|${pickup}`,
+          date,
+          time,
+          passenger,
+          phone: (document.getElementById("trip-phone").value || "").trim(),
+          medicaid: (document.getElementById("trip-medicaid").value || "").trim(),
+          invoice: (document.getElementById("trip-invoice").value || "").trim(),
+          transport: (document.getElementById("trip-transport").value || "").trim(),
+          pickup,
+          dropoff,
+          vehicle: (document.getElementById("trip-vehicle").value || "").trim(),
+          driver,
+          status: (document.getElementById("trip-status").value || "").trim(),
+          notes: (document.getElementById("trip-notes").value || "").trim()
+        };
+
+        const isStandingOrder = document.getElementById("standing-order-checkbox")?.checked;
+        let standingOrder = null;
+        // These are needed outside the initial standing-order block so declare
+        // them upfront for access later when expanding the date pattern
+        let frequency, startDate, endDate, selectedDays;
+        if (isStandingOrder) {
+          frequency = document.getElementById("standing-frequency").value.trim();
+          startDate = document.getElementById("standing-start-date").value.trim();
+          endDate = document.getElementById("standing-end-date").value.trim();
+          selectedDays = Array.from(
+            document.querySelectorAll("#custom-days input:checked")
+          ).map(cb => cb.value);
+
+          const start = parseLocalDate(startDate);
+          const end = parseLocalDate(endDate);
+          if (end < start) {
+            alert("🚫 Standing order end date cannot be before start date.");
+            document.getElementById("loading-overlay").style.display = "none";
+            return;
+          }
+          if ((end - start) / 86400000 > 183) {
+            alert("🚫 Standing order cannot exceed 183 days.");
+            document.getElementById("loading-overlay").style.display = "none";
+            return;
+          }
+        }
+
+        const isReturnTrip = document.getElementById("return-trip-checkbox")?.checked;
+        const returnTime = document.getElementById("return-trip-time")?.value?.trim();
+
+        // ✅ If return trip is checked but no time is provided
+        if (isReturnTrip && !returnTime) {
+          alert("🚫 Please enter a return trip time.");
+          document.getElementById("loading-overlay").style.display = "none";
+          return;
+        }
+
+        // ✅ Ensure return trip time is later than the main trip time
+        if (isReturnTrip && returnTime) {
+          const [th, tm] = time.split(":").map(Number);
+          const [rh, rm] = returnTime.split(":").map(Number);
+          if (rh < th || (rh === th && rm <= tm)) {
+            alert("🚫 Return time must be later than the trip time.");
+            document.getElementById("loading-overlay").style.display = "none";
+            return;
+          }
+        }
+
+        let expandedDates = [date];
+        if (isStandingOrder) {
+          const dayNames = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+          const freq = frequency;
+          const startDay = dayNames[parseLocalDate(startDate).getDay()];
+          let daysForPattern = [];
+          switch (freq) {
+            case "DAILY":
+              daysForPattern = dayNames;
+              break;
+            case "WEEKDAYS":
+              daysForPattern = dayNames.slice(1, 6);
+              break;
+            case "WEEKENDS":
+              daysForPattern = [dayNames[0], dayNames[6]];
+              break;
+            default:
+              daysForPattern = selectedDays.length
+                ? selectedDays
+                : [startDay];
+          }
+          const pattern = encodeDatePattern(
+            startDate,
+            endDate,
+            daysForPattern
+          );
+          standingOrder = {
+            pattern,
+            withReturnTrip: isReturnTrip,
+            ...(isReturnTrip && returnTime ? { returnTime } : {})
+          };
+          expandedDates = decodeDatePattern(pattern);
+        }
+
+        const tripsToSave = [];
+        let parentTripKeyID = null;
+        for (const dateStr of expandedDates) {
+          const tripKeyID = generateTripKeyID();
+          if (!parentTripKeyID) parentTripKeyID = tripKeyID;
+          const t = {
+            ...trip,
+            date: dateStr,
+            tripKeyID,
+            id: `${driver}|${dateStr}|${time}|${passenger}|${pickup}`,
+            ...(isStandingOrder ? { recurringId: parentTripKeyID } : {})
+          };
+          tripsToSave.push(t);
+
+          if (isReturnTrip && returnTime) {
+            const returnKey = generateTripKeyID();
+            const rt = {
+              ...t,
+              tripKeyID: returnKey,
+              id: `${driver}|${dateStr}|${returnTime}|${passenger}|${dropoff}`,
+              time: returnTime,
+              pickup: dropoff,
+              dropoff: pickup,
+              notes: (t.notes || "") + " [RETURN TRIP]",
+              returnOf: t.id,
+              ...(isStandingOrder ? { recurringId: parentTripKeyID } : {})
+            };
+            tripsToSave.push(rt);
+          }
+        }
+
+        function finalize() {
+          document.getElementById("loading-overlay").style.display = "none";
+          google.script.run
+            .withSuccessHandler()
+            .withFailureHandler(handleError)
+            .openPassengerTripList(date, "✅ Trip added");
+        }
+
+        function saveTrips() {
+          if (isStandingOrder && standingOrder) {
+            google.script.run
+              .withSuccessHandler(map => {
+                map[parentTripKeyID] = standingOrder;
+                google.script.run
+                  .withSuccessHandler(() => {
+                    const parent = [parentTripKeyID, tripObjectToRowArray(tripsToSave[0])];
+                    google.script.run
+                      .withSuccessHandler(finalize)
+                      .withFailureHandler(handleError)
+                      .createRecurringTripsFromSidebar(parent, expandedDates);
+                  })
+                  .withFailureHandler(handleError)
+                  .updateStandingOrderMap(map);
+              })
+              .withFailureHandler(handleError)
+              .getStandingOrderMap();
+          } else {
+            google.script.run
+              .withSuccessHandler(finalize)
+              .withFailureHandler(handleError)
+              .addTripsFromSidebar(tripsToSave);
+          }
+        }
+
+        const duplicateChecks = tripsToSave.map(t =>
+          new Promise((resolve, reject) => {
+            google.script.run
+              .withSuccessHandler(res => resolve(res))
+              .withFailureHandler(err => reject(err))
+              .checkDuplicateTrip(t);
+          })
+        );
+
+        Promise.all(duplicateChecks)
+          .then(results => {
+            if (results.some(r => r)) {
+              alert("🚫 Duplicate trip detected.");
+              document.getElementById("loading-overlay").style.display = "none";
+              return;
+            }
+
+            const passengerChecks = tripsToSave.map(t =>
+              new Promise((resolve, reject) => {
+                google.script.run
+                  .withSuccessHandler(res => resolve(res))
+                  .withFailureHandler(err => reject(err))
+                  .checkPassengerConflict(t);
+              })
+            );
+
+            Promise.all(passengerChecks)
+              .then(pResults => {
+                if (pResults.some(r => r)) {
+                  alert("🚫 Passenger has a conflicting trip at that time.");
+                  document.getElementById("loading-overlay").style.display = "none";
+                  return;
+                }
+
+                const conflictChecks = tripsToSave.map(t =>
+                  new Promise((resolve, reject) => {
+                    google.script.run
+                      .withSuccessHandler(res => resolve(res))
+                      .withFailureHandler(err => reject(err))
+                      .checkDriverConflict(t);
+                  })
+                );
+
+                Promise.all(conflictChecks)
+                  .then(cResults => {
+                    if (cResults.some(r => r)) {
+                      alert("🚫 Driver has a conflicting trip at that time.");
+                      document.getElementById("loading-overlay").style.display = "none";
+                      return;
+                    }
+                    saveTrips();
+                  })
+                  .catch(err => {
+                    document.getElementById("loading-overlay").style.display = "none";
+                    handleError(err);
+                  });
+              })
+              .catch(err => {
+                document.getElementById("loading-overlay").style.display = "none";
+                handleError(err);
+              });
+          })
+          .catch(err => {
+            document.getElementById("loading-overlay").style.display = "none";
+            handleError(err);
+          });
+      }
+
+    </script>
+  </body>
+</html>

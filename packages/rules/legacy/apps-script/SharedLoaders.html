@@ -1,0 +1,202 @@
+<script>
+  // 🚍 Load all dropdown data (call from DOMContentLoaded)
+  function loadTripFormData(preloaded) {
+    const applyBundle = function (bundle) {
+      if (!bundle) return false;
+      try { localStorage.setItem("passengerProfiles", JSON.stringify(bundle.profiles || {})); } catch (e) {}
+      renderPassengerProfiles(bundle.profiles || {});
+      renderVehicleOptions(bundle.vehicles || []);
+      renderDriverOptions(bundle.drivers || []);
+      return true;
+    };
+    if (applyBundle(preloaded || window.__formOptionsPreload)) return;
+    google.script.run.withSuccessHandler(applyBundle).getFormOptionsBundle();
+  }
+
+  // 👤 Renders Passenger Names + Options
+  function renderPassengerProfiles(data) {
+    const input = document.getElementById("trip-passenger");
+    const list = document.getElementById("autocomplete-list");
+    const names = Object.keys(data);
+
+    input.addEventListener("input", function () {
+      const query = this.value.toLowerCase();
+      list.innerHTML = "";
+
+      if (!query || query.length < 1) {
+        list.style.display = "none";
+        return;
+      }
+
+      const matches = names.filter(name => name.toLowerCase().includes(query));
+      matches.slice(0, 10).forEach(match => {
+        const li = document.createElement("li");
+        li.textContent = match;
+        li.onclick = () => {
+          input.value = match;
+          list.innerHTML = "";
+          list.style.display = "none";
+
+          syncPassengerProfile(match); // ✅ Reuse sync logic
+        };
+        list.appendChild(li);
+      });
+
+      list.style.display = matches.length ? "block" : "none";
+    });
+  }
+
+  function updateArrayProfileValue(profile, key, element) {
+    if(profile[key].includes(element.value)) {
+      return element.value
+    } 
+
+    return profile[key][0] || ""
+  }
+
+  // 🔁 Pull passenger profile from localStorage and populate fields
+  function syncPassengerProfile(name) {
+    const raw = localStorage.getItem("passengerProfiles");
+    const medicaidInput = document.getElementById("trip-medicaid");
+
+    if (!raw) return;
+
+    const profiles = JSON.parse(raw);
+    const profile = profiles[name];
+    if (!profile) return;
+
+    // Transport
+    document.getElementById("trip-transport").value = profile.type || "";
+
+    // Phones
+    const phoneList = document.getElementById("phone-options");
+    const phoneInput = document.getElementById("trip-phone");
+
+    phoneList.innerHTML = "";
+    phoneInput.value =  updateArrayProfileValue(profile, "phones", phoneInput);
+
+    (profile.phones || []).forEach(p => {
+      const val = p.trim();
+      if (val) {
+        const opt = document.createElement("option");
+        opt.value = val;
+        phoneList.appendChild(opt);
+      }
+    });
+    
+
+    // Medicaid (plain input)
+    let medicaidValues = profile.medicaid || [];
+
+    if (typeof medicaidValues === 'string') {
+      medicaidValues = [medicaidValues];
+    }
+
+    if (medicaidValues.length === 1) {
+      medicaidInput.value = medicaidValues[0];
+    } else {
+      medicaidInput.value = "";
+    }
+    
+    // Addresses
+    cont pickupList = document.getElementById("pickup-options");
+    const dropoffList = document.getElementById("dropoff-options");
+    const pickupInput = document.getElementById("trip-pickup");
+    const dropoffInput = document.getElementById("trip-dropoff");
+    pickupList.innerHTML = "";
+    dropoffList.innerHTML = "";
+
+    pickupInput.value = updateArrayProfileValue(profile, "addresses", pickupInput);
+    dropoffInput.value = updateArrayProfileValue(profile, "addresses", dropoffInput);
+
+    (profile.addresses || []).forEach(addr => {
+      const val = addr.trim();
+      if (val.length > 5) {
+        const opt1 = document.createElement("option");
+        const opt2 = document.createElement("option");
+        opt1.value = val;
+        opt2.value = val;
+        pickupList.appendChild(opt1);
+        dropoffList.appendChild(opt2);
+      }
+    });
+  }
+
+  // 🚗 Renders Vehicle Options
+  function renderVehicleOptions(vehicleList) {
+    const datalist = document.getElementById("vehicle-options");
+    datalist.innerHTML = "";
+
+    vehicleList.forEach(v => {
+      const opt = document.createElement("option");
+      opt.value = v.label;
+      opt.setAttribute("data-vehicle-type", v.vehicleType);
+      datalist.appendChild(opt);
+    });
+  }
+
+  // 👨‍✈️ Renders Driver Options
+  function renderDriverOptions(driverList) {
+    const datalist = document.getElementById("driver-options");
+    datalist.innerHTML = "";
+
+    driverList.forEach(driver => {
+      const opt = document.createElement("option");
+      opt.value = driver.label;
+      datalist.appendChild(opt);
+    });
+  }
+
+  function parseLocalDate(dateStr) {
+    if (!dateStr) return new Date(NaN);
+    const [y, m, d] = dateStr.split("-").map(Number);
+    return new Date(y, m - 1, d);
+  }
+
+  function encodeDatePattern(startDate, endDate, daysOfWeek) {
+    const days = Array.isArray(daysOfWeek)
+      ? daysOfWeek.map(d => d.toUpperCase()).join(',')
+      : '';
+    return [startDate, endDate, days].join('|');
+  }
+
+  function decodeDatePattern(patternStr) {
+    if (!patternStr) return [];
+    const [startStr, endStr, daysStr] = patternStr.split('|');
+    if (!startStr || !endStr || !daysStr) return [];
+
+    const dayMap = {
+      SUN: 0, MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6,
+    };
+    const dayNums = daysStr
+      .split(',')
+      .map(d => dayMap[d.trim().toUpperCase()])
+      .filter(d => d !== undefined);
+    if (dayNums.length === 0) return [];
+
+    const [sy, sm, sd] = startStr.split('-').map(Number);
+    const [ey, em, ed] = endStr.split('-').map(Number);
+    const start = new Date(sy, sm - 1, sd);
+    const end = new Date(ey, em - 1, ed);
+
+    const dates = [];
+    for (let cur = new Date(start); cur <= end; cur.setDate(cur.getDate() + 1)) {
+      if (dayNums.includes(cur.getDay())) {
+        const y = cur.getFullYear();
+        const mo = String(cur.getMonth() + 1).padStart(2, '0');
+        const dd = String(cur.getDate()).padStart(2, '0');
+        dates.push(y + '-' + mo + '-' + dd);
+      }
+    }
+    return dates;
+  }
+
+  function expandStandingOrder(recurringId, map) {
+    if (!recurringId || !map) return [];
+    const standingOrder = map[recurringId];
+    if (standingOrder && standingOrder.pattern) {
+      return decodeDatePattern(standingOrder.pattern);
+    }
+    return [];
+  }
+</script>

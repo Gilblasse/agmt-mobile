@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      # Both apps consume the rules package's compiled output, so build it first.
+      - name: Build shared rules
+        run: bun run --filter '@ag/rules' build
+
+      # Typecheck, 34 rule suites, and the differential parity run against the
+      # live Apps Script still shipped in packages/rules/legacy. If this fails,
+      # the rewrite has drifted from the system that is invoicing real money.
+      - name: Verify rules against the live system
+        run: bun run --filter '@ag/rules' verify
+
+      - name: Typecheck web
+        run: bun run --filter '@ag/web' typecheck
+
+      - name: Typecheck mobile
+        run: bun run --filter '@ag/mobile' typecheck
+
+      - name: Build web
+        run: bun run --filter '@ag/web' build
+
+      # Proves the shared rules still bundle into a phone build.
+      - name: Export mobile bundles
+        run: bun run --filter '@ag/mobile' export:all

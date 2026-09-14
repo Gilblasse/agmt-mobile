@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" integrity="sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T" crossorigin="anonymous">
+    
+    <style>
+    #selectedDate,.selectTagBtn{
+      width:380px;
+    }
+    #action-buttons{
+      display:flex; 
+    }
+     .cancelBtn {
+     background-color: #F2F2F2;
+     border:1px solid #F2F2F2;
+     margin-right:10px;
+     }
+     
+     .createbtn{
+     margin-left:10px;
+     }
+    
+    </style>
+    
+  </head>
+  <body>
+  
+  
+  <div class="btn-group selectTagBtn">
+  
+  <select id="selectedDate" class="btn btn-light btn-lg">
+  <option value="Choose">Choose Date...</option> 
+  <? var dispatchSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DISPATCH"); ?>
+  <? var dates =  dispatchSheet.getRange("A2:A100").getValues(); ?>
+  <? var arr = [];?>
+  
+  <? for(var i=0; i<dates.length; i++){ ?>
+      <? arr.push(String(dates[i][0]).slice(0,10)); ?>
+  <? } ?>
+  
+  
+
+ <? var filteredArray = arr.filter(function(item, pos){ ?>
+       <? if(item !== ""){ ?>
+             <? return arr.indexOf(item)== pos; ?>
+       <? } ?>
+     
+ <? }); ?>
+ 
+  <? filteredArray.forEach(function(date){ ?>
+       <option value="<?=date?>"> <?=date?> </option>
+  <? }) ?>
+  </select>
+ </div> 
+ 
+   
+  <br>
+  <br>
+  
+  <ul id="listStatus"></ul>
+  
+  <br>
+  <br>
+  <div id="action-buttons">
+
+<button class="btn btn-danger cancelBtn" onmouseup="closeButton()">Cancel</button>
+<button id="subBtn" class="btn btn-info" onmouseup="createAndSend()">Create Times and Send</button>
+<button id="createButton" class="btn btn-warning createbtn" onmouseup="createBtn()">Create Times</button>
+
+</div>
+
+
+
+<script>
+//Cancel Btn
+  function closeButton(){
+    google.script.host.close();
+  };
+ 
+// Creates Start Time For Slected Date and Send To All Drivers
+ window.createAndSend = function() {
+    var selectedDate = document.getElementById('selectedDate').value;
+    var submitBtn = document.getElementById('subBtn');
+    var statuslist = document.getElementById('listStatus');
+    
+    submitBtn.innerText = "processing...";
+    
+    if(statuslist.innerHTML !== ""){
+      statuslist.innerHTML = "";
+    }
+
+    google.script.run.withSuccessHandler(function(obj){
+    
+    addBeginTimeObjReturned(obj);
+    
+    submitBtn.innerText = "Create and Send";
+    }).addBeginTime(selectedDate);
+  };
+
+
+
+window.addBeginTimeObjReturned = function(obj){
+
+  for(var i=0; i<obj.length;i++){
+    var selectedDriver = obj[i].name;
+    var selectedDate = obj[i].date;
+    
+    google.script.run.withSuccessHandler(function(dataArryObj){
+      sendToDrivers(dataArryObj);
+    }).findEmail(selectedDriver,selectedDate);
+  }//end of Loop
+}
+
+
+
+window.sendToDrivers = function(dataArryObj){
+ var statuslist = document.getElementById('listStatus');
+ var driversName = dataArryObj[0].name;
+ var errorCode = typeof dataArryObj[0].error;
+  
+var message ={
+"undefined":"Successfuly sent to "+driversName,
+"string":dataArryObj[0].error
+}
+
+statuslist.innerHTML += message[errorCode].includes('ERROR') ? "<li style='color:red'>"+message[errorCode]+"</li>" : "<li style='color:green'>"+message[errorCode]+"</li>"
+}
+
+
+
+
+
+// Creates Start Time For Slected Date 
+ window.createBtn = function() {
+    var selectedDate = document.getElementById('selectedDate').value;
+    var createBTN = document.getElementById('createButton');
+    var statuslist = document.getElementById('listStatus');
+    var messages = [];
+    
+    createBTN.innerText = "processing...";
+
+    
+    google.script.run.withSuccessHandler(function(obj){
+        createBTN.innerText = "Done...";
+        google.script.host.close();
+    }).addBeginTime(selectedDate);
+  };
+
+</script>
+  </body>
+</html>
+
+

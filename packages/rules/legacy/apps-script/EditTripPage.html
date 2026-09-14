@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <?!= include('TripStyles') ?>
+  </head>
+  <body>
+    <?!= include('loading') ?>
+
+    <div class="trip-form">
+      <div class="header-row">
+        <span class="back-button" title="Back" onclick="goBack()">←</span>
+        <h2>Edit Trip</h2>
+        <span class="delete-icon" style="display:none;" title="Delete Trip" onclick="confirmDelete()">🗑️</span>
+      </div>
+
+      <?!= include('TripFormFields') ?>
+
+      <button class="save-button" style="display:none;" onclick="submitTrip()" disabled>💾 Save Trip</button>
+
+    </div>
+
+    <div id="delete-modal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-message">Select dates to delete</div>
+        <div id="standing-dates" style="max-height:150px;overflow-y:auto;text-align:left;margin-bottom:8px;"></div>
+        <div class="modal-actions">
+          <button class="btn-cancel" onclick="closeDeleteModal()">Cancel</button>
+          <button class="btn-full" onclick="confirmDeleteSelected()">Delete selected dates</button>
+        </div>
+      </div>
+    </div>
+
+    <?!= include('SharedLoaders') ?>
+
+    <script>
+      const rawTripId = <?= JSON.stringify(tripId) ?>.replace(/^"+|"+$/g, '');
+      const rawTripDate = <?= JSON.stringify(tripDate) ?>.replace(/^"+|"+$/g, '');
+      let currentTrip = null;
+      const preloadedTrip = <?!= initialTrip || 'null' ?>;
+      window.__formOptionsPreload = <?!= formOptions || 'null' ?>;
+
+      function checkFormValidity() {
+        const requiredFields = document.querySelectorAll('.trip-form [required]');
+        const saveBtn = document.querySelector('.save-button');
+        const allValid = Array.from(requiredFields).every(f => f.value.trim());
+        if (saveBtn) {
+          saveBtn.disabled = !allValid;
+          saveBtn.classList.toggle('disabled', !allValid);
+        }
+      }
+
+      document.addEventListener("DOMContentLoaded", () => {
+        // Hide add-trip only checkboxes
+        const rtInput = document.getElementById("return-trip-checkbox");
+        if (rtInput && rtInput.parentElement && rtInput.parentElement.parentElement) {
+          rtInput.parentElement.parentElement.style.display = "none";
+        }
+        const rtContainer = document.getElementById("return-time-container");
+        if (rtContainer) rtContainer.style.display = "none";
+        const soInput = document.getElementById("standing-order-checkbox");
+        if (soInput && soInput.parentElement && soInput.parentElement.parentElement) {
+          soInput.parentElement.parentElement.style.display = "none";
+        }
+        const soContainer = document.getElementById("standing-order-container");
+        if (soContainer) soContainer.style.display = "none";
+
+        const parsedTrip = { id: rawTripId, date: rawTripDate };
+        const safeId = encodeURIComponent(parsedTrip.id);
+        const safeDate = rawTripDate ? formatDateString(new Date(rawTripDate)) : "";
+
+        loadTripFormData(window.__formOptionsPreload); // passengers, vehicles, drivers (preloaded when available)
+        if (preloadedTrip && (preloadedTrip.id || preloadedTrip.tripKeyID)) {
+          populateTripForm(preloadedTrip);
+        } else {
+          document.getElementById("loading-overlay").style.display = "flex";
+          google.script.run
+            .withSuccessHandler(populateTripForm)
+            .withFailureHandler(handleError)
+            .getTripById(safeId, safeDate);
+        }
+
+        checkFormValidity();
+        document.querySelectorAll('.trip-form input, .trip-form select, .trip-form textarea').forEach(el => {
+          el.addEventListener('input', checkFormValidity);
+          el.addEventListener('change', checkFormValidity);
+        });
+      });
+
+
+      function toggleSaveButtonVisibility(tripDate) {
+        const saveButton = document.querySelector(".save-button");
+        const deleteButton = document.querySelector(".delete-icon");
+        
+        if (!saveButton || !tripDate) return;
+
+        // Parse selected date
+        const parts = tripDate.split("-");
+        const selectedDate = new Date(parts[0], parts[1] - 1, parts[2]);
+        selectedDate.setHours(0, 0, 0, 0);
+
+        // Get today's date
+        const now = new Date();
+        now.setHours(0, 0, 0, 0);
+
+        const isEditable = selectedDate >= now;
+
+        // ✅ SHOW only if editable
+        saveButton.style.display = isEditable ? "block" : "none";
+        deleteButton.style.display = isEditable ? "block" : "none";
+      }
+
+
+      function formatDateString(date) {
+        return new Date(date).toISOString().slice(0, 10);
+      }
+
+      function stripQuotes(str) {
+        return typeof str === 'string' ? str.replace(/^"+|"+$/g, '').trim() : str;
+      }
+
+      function formatTime(dateStr) {
+        if (/^\d{2}:\d{2}$/.test(dateStr)) {
+          return dateStr;
+        }
+        return new Date(dateStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
+      }
+
+      function convertISOStringToTimeInput(isoString) {
+        const date = new Date(isoString);
+        const hours = String(date.getUTCHours()).padStart(2, '0');
+        const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+        return `${hours}:${minutes}`;
+      }
+
+      function parseLocalDate(dateStr) {
+        if (!dateStr) return new Date(NaN);
+        const [y, m, d] = dateStr.split("-").map(Number);
+        return new Date(y, m - 1, d);
+      }
+
+      function goBack() {
+        const date = document.getElementById("trip-date").value
+        google.script.run.withSuccessHandler().withFailureHandler(handleError).openPassengerTripList(date);
+      }
+
+      function handleError(e) {
+        document.getElementById("loading-overlay").style.display = "none";
+        showToast("⚠️ Error: " + (e.message || e), "error");
+      }
+
+      function populateTripForm(trip) {
+        currentTrip = trip;
+        const time = convertISOStringToTimeInput(trip.time);
+        const tripDate = trip.date ? (formatDateString(trip.date) || '') : '';
+        
+        toggleSaveButtonVisibility(tripDate);
+        document.getElementById("loading-overlay").style.display = "none";
+
+        document.getElementById("trip-id").value = trip.id || '';
+        document.getElementById("trip-date").value = tripDate;
+        document.getElementById("trip-time").value = time || '';
+        document.getElementById("trip-passenger").value = trip.passenger || '';
+        syncPassengerProfile(trip.passenger || ''); // ✅ Add this line
+
+        document.getElementById("trip-phone").value = trip.phone || '';
+        document.getElementById("trip-medicaid").value = trip.medicaid || '';
+        document.getElementById("trip-invoice").value = trip.invoice || '';
+        document.getElementById("trip-transport").value = trip.transport || '';
+        document.getElementById("trip-pickup").value = trip.pickup || '';
+        document.getElementById("trip-dropoff").value = trip.dropoff || '';
+        document.getElementById("trip-vehicle").value = trip.vehicle || '';
+        document.getElementById("trip-driver").value = trip.driver || '';
+        document.getElementById("trip-status").value = trip.status || '';
+        document.getElementById("trip-notes").value = trip.notes || '';
+        checkFormValidity();
+      }
+
+
+      function submitTrip() {
+        document.getElementById("loading-overlay").style.display = "flex";
+
+        const trip = {
+          tripKeyID: currentTrip ? currentTrip.tripKeyID : '',
+          id: document.getElementById("trip-id").value,
+          date: document.getElementById("trip-date").value,
+          time: document.getElementById("trip-time").value,
+          passenger: document.getElementById("trip-passenger").value,
+          phone: document.getElementById("trip-phone").value,
+          medicaid: document.getElementById("trip-medicaid").value,
+          invoice: document.getElementById("trip-invoice").value,
+          transport: document.getElementById("trip-transport").value,
+          pickup: document.getElementById("trip-pickup").value,
+          dropoff: document.getElementById("trip-dropoff").value,
+          vehicle: document.getElementById("trip-vehicle").value,
+          driver: document.getElementById("trip-driver").value,
+          status: document.getElementById("trip-status").value,
+          notes: document.getElementById("trip-notes").value,
+          returnOf: currentTrip ? (currentTrip.returnOf || '') : '',
+          recurringId: currentTrip ? (currentTrip.recurringId || '') : ''
+        };
+
+        google.script.run
+          .withSuccessHandler(() => {
+            document.getElementById("loading-overlay").style.display = "none";
+            google.script.run.withSuccessHandler().withFailureHandler(handleError).openPassengerTripList(trip.date, "✅ Changes saved");
+          })
+          .withFailureHandler(handleError)
+          .updateTripFromSidebar(trip);
+      }
+
+      function confirmDelete() {
+        const tripKeyID = currentTrip ? currentTrip.tripKeyID : '';
+        const date = document.getElementById("trip-date").value;
+
+        if (!tripKeyID) return;
+        if (!date) {
+          alert("Date must be provided");
+          return;
+        }
+
+        if (currentTrip && currentTrip.recurringId) {
+          openDeleteModal();
+          return;
+        }
+
+        if (!confirm("Are you sure you want to delete this trip?")) return;
+
+        document.getElementById("loading-overlay").style.display = "flex";
+        const runner = google.script.run
+          .withSuccessHandler(() => {
+            const d = document.getElementById("trip-date").value;
+            document.getElementById("loading-overlay").style.display = "none";
+            google.script.run
+              .withSuccessHandler()
+              .withFailureHandler(handleError)
+              .openPassengerTripList(d, "🗑️ Trip deleted");
+          })
+          .withFailureHandler(handleError);
+
+        runner.deleteTripFromSidebar(tripKeyID, date);
+      }
+
+      function openDeleteModal() {
+        const container = document.getElementById("standing-dates");
+        container.innerHTML = "";
+        google.script.run.withSuccessHandler(map => {
+          const dates = expandStandingOrder(currentTrip.recurringId, map);
+          dates.forEach(d => {
+            const label = document.createElement("label");
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.value = d;
+            cb.checked = true;
+            label.appendChild(cb);
+            label.append(" " + d);
+            container.appendChild(label);
+          });
+          document.getElementById("delete-modal").classList.remove("hidden");
+        }).getStandingOrderMap();
+      }
+
+      function closeDeleteModal() {
+        document.getElementById("delete-modal").classList.add("hidden");
+      }
+
+      function confirmDeleteSelected() {
+        const selected = Array.from(document.querySelectorAll("#standing-dates input:checked"))
+          .map(cb => cb.value);
+        document.getElementById("delete-modal").classList.add("hidden");
+        if (selected.length === 0) return;
+        document.getElementById("loading-overlay").style.display = "flex";
+        const runner = google.script.run
+          .withSuccessHandler(() => {
+            const d = document.getElementById("trip-date").value;
+            document.getElementById("loading-overlay").style.display = "none";
+            google.script.run
+              .withSuccessHandler()
+              .withFailureHandler(handleError)
+              .openPassengerTripList(d, "🗑️ Deleted " + selected.length + (selected.length === 1 ? " trip" : " trips"));
+          })
+          .withFailureHandler(handleError);
+
+        runner.deleteRecurringTripsFromSidebar(currentTrip.recurringId, selected);
+      }
+    </script>
+  </body>
+</html>

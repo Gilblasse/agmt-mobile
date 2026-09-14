@@ -1,0 +1,196 @@
+<!-- TripFormFields.html -->
+<div class="scroll-container">
+  <input type="hidden" id="trip-id">
+
+  <label>Date</label>
+  <input type="date" id="trip-date" class="trip-input" required>
+
+  <label>Time</label>
+  <input type="time" id="trip-time" class="trip-input">
+
+  <label>Passenger</label>
+  <div class="autocomplete-wrapper">
+    <input
+      type="text"
+      id="trip-passenger"
+      class="trip-input"
+      autocomplete="off"
+      required
+      onblur="syncPassengerProfile(this.value)" />
+    <ul id="autocomplete-list" class="autocomplete-list"></ul>
+  </div>
+
+
+
+  <label>Phone</label>
+  <input list="phone-options" id="trip-phone" class="trip-input">
+  <datalist id="phone-options"></datalist>
+
+  <div class="row">
+    <div class="col">
+      <label>Medicaid #</label>
+      <input type="text" id="trip-medicaid" class="trip-input">
+    </div>
+    <div class="col">
+      <label>Invoice #</label>
+      <input type="text" id="trip-invoice" class="trip-input">
+    </div>
+  </div>
+
+  <label>Transport</label>
+  <input list="transport-options" id="trip-transport" class="trip-input">
+  <datalist id="transport-options">
+    <option value="Taxi">
+    <option value="Ambulatory">
+    <option value="Wheelchair">
+    <option value="Stretcher">
+  </datalist>
+
+  <div class="row">
+    <div class="col">
+      <label for="trip-pickup">Pick Up</label>
+      <input list="pickup-options" id="trip-pickup" class="trip-input">
+      <datalist id="pickup-options"></datalist>
+    </div>
+    <div class="col">
+      <label for="trip-dropoff">Drop Off</label>
+      <input list="dropoff-options" id="trip-dropoff" class="trip-input">
+      <datalist id="dropoff-options"></datalist>
+    </div>
+  </div>
+  <div class="google-maps-link" style="margin-top: 10px; font-size: 12px; text-align: center;">
+    <a 
+      id="maps-directions-link" 
+      href="#" 
+      target="_blank" 
+      style="display: none; text-decoration: none; color: #007bff;"
+    >
+      ➤ Open directions in Google Maps
+    </a>
+  </div>
+
+  <div style="margin-top: 12px;">
+    <label>
+      <input type="checkbox" id="return-trip-checkbox" onchange="toggleReturnTime()" />
+      Also create return trip
+    </label>
+  </div>
+
+  <div id="return-time-container" style="margin-top: 8px; display: none;">
+    <label>Return Trip Time</label>
+    <input type="time" id="return-trip-time" class="trip-input" />
+  </div>
+
+  <div style="margin-top: 12px;">
+    <label>
+      <input type="checkbox" id="standing-order-checkbox" onchange="toggleStandingOrder()" />
+      Standing order
+    </label>
+  </div>
+
+  <div id="standing-order-container" style="display:none;margin-top:8px;">
+    <label>Frequency</label>
+    <select id="standing-frequency" class="trip-input" onchange="toggleCustomDays()">
+      <option value="DAILY">Daily</option>
+      <option value="WEEKDAYS">Weekdays (Mon–Fri)</option>
+      <option value="WEEKENDS">Weekends</option>
+      <option value="WEEKLY">Weekly</option>
+      <option value="BIWEEKLY">Bi-weekly</option>
+      <option value="MONTHLY">Monthly</option>
+    </select>
+
+    <div id="custom-days" style="display:none;margin-top:8px;">
+      <label><input type="checkbox" value="MON">Mon</label>
+      <label><input type="checkbox" value="TUE">Tue</label>
+      <label><input type="checkbox" value="WED">Wed</label>
+      <label><input type="checkbox" value="THU">Thu</label>
+      <label><input type="checkbox" value="FRI">Fri</label>
+      <label><input type="checkbox" value="SAT">Sat</label>
+      <label><input type="checkbox" value="SUN">Sun</label>
+    </div>
+
+    <label>Start Date</label>
+    <input type="date" id="standing-start-date" class="trip-input" />
+
+    <label>End Date</label>
+    <input type="date" id="standing-end-date" class="trip-input" />
+  </div>
+
+
+  <label>Vehicle</label>
+  <input list="vehicle-options" id="trip-vehicle" class="trip-input" placeholder="Enter or select vehicle">
+  <datalist id="vehicle-options"></datalist>
+
+
+  <label>Driver</label>
+  <input list="driver-options" id="trip-driver" class="trip-input" placeholder="Enter or select driver">
+  <datalist id="driver-options"></datalist>
+
+  <label>Status</label>
+  <input list="status-options" id="trip-status" class="trip-input" placeholder="Enter or select status">
+  <datalist id="status-options">
+    <option value="READY">
+    <option value="CANCEL">
+    <option value="COMPLETE">
+    <option value="REASSIGN">
+    <option value="NO SHOW">
+    <option value="UPDATE TIME">
+    <option value="NOT CONFIRMED">
+    <option value="IN TRANSIT">
+    <option value="IN ROUTE">
+    <option value="WAITING">
+    <option value="PICK UP LOCATION">
+    <option value="DROP OFF LOCATION">
+  </datalist>
+
+  <label>Notes</label>
+  <textarea id="trip-notes" class="trip-input" rows="8" placeholder="Optional notes..."></textarea>
+</div>
+
+<script>
+  //<![CDATA[
+  const pickupInput = document.getElementById("trip-pickup");
+  const dropoffInput = document.getElementById("trip-dropoff");
+  const mapsLink = document.getElementById("maps-directions-link");
+  const standingStartInput = document.getElementById("standing-start-date");
+  const standingEndInput = document.getElementById("standing-end-date");
+
+  function updateStandingEndMax() {
+    if (!standingStartInput || !standingEndInput) return;
+    standingEndInput.min = standingStartInput.value;
+    if (typeof parseLocalDate === "function") {
+      const start = parseLocalDate(standingStartInput.value);
+      if (!isNaN(start)) {
+        const max = new Date(start.getTime() + 183 * 86400000);
+        standingEndInput.max = max.toISOString().slice(0, 10);
+        if (
+          standingEndInput.value &&
+          standingEndInput.value < standingStartInput.value
+        ) {
+          standingEndInput.value = standingStartInput.value;
+        }
+      }
+    }
+  }
+
+  function updateMapsLink() {
+    const pu = pickupInput.value.trim();
+    const do_ = dropoffInput.value.trim();
+
+    if (pu && do_) {
+      const url = "http://maps.google.com/maps/dir/" + encodeURIComponent(pu) + "/" + encodeURIComponent(do_);
+      mapsLink.href = url;
+      mapsLink.style.display = "inline";
+    } else {
+      mapsLink.style.display = "none";
+    }
+  }
+
+  pickupInput.addEventListener("input", updateMapsLink);
+  dropoffInput.addEventListener("input", updateMapsLink);
+  if (standingStartInput) {
+    document.addEventListener("DOMContentLoaded", updateStandingEndMax);
+    standingStartInput.addEventListener("change", updateStandingEndMax);
+  }
+  //]]>
+</script>

@@ -1,0 +1,70 @@
+<!-- loading.html -->
+<div id="loading-overlay" style="
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(255, 255, 255, 0.8);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+  font-size: 18px;
+  font-weight: bold;
+  display: none;
+  flex-direction: column;
+">
+  <div class="spinner" style="
+    border: 4px solid #ccc;
+    border-top: 4px solid #4CAF50;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    animation: spin 1s linear infinite;
+    margin-bottom: 10px;
+  "></div>
+  Loading...
+</div>
+
+<style>
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+</style>
+
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<style>
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%) translateY(20px);
+    background: #323232;
+    color: #fff;
+    padding: 10px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    z-index: 9999;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.error { background: #c62828; }
+</style>
+
+<script>
+  var __toastTimer = null;
+  function showToast(message, type) {
+    var t = document.getElementById("toast");
+    if (!t) return;
+    t.textContent = message;
+    t.classList.remove("error");
+    if (type === "error") t.classList.add("error");
+    t.classList.add("show");
+    if (__toastTimer) clearTimeout(__toastTimer);
+    __toastTimer = setTimeout(function () { t.classList.remove("show"); }, type === "error" ? 4000 : 2500);
+  }
+</script>

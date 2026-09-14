@@ -1,0 +1,27 @@
+{
+  "name": "@ag/mobile",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "expo": "~57.0.22",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "@ag/rules": "workspace:*"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "export:ios": "expo export --platform ios",
+    "export:android": "expo export --platform android",
+    "export:all": "expo export --platform ios && expo export --platform android"
+  },
+  "private": true,
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/react": "~19.2.0"
+  }
+}
