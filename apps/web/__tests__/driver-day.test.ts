@@ -290,13 +290,22 @@ describe('undoing a tap', () => {
 
   it('is idempotent, like a tap', async () => {
     const trip = await makeTrip(mineId, await officeToday());
+    // Two steps up, so a re-sent undo actually reaches the nonce check. From
+    // one step up the trip lands on '' and the early return answers instead,
+    // which made this test pass with the idempotency handling deleted.
     await tap(mineToken, trip, { progress: 'IN ROUTE', idempotencyKey: randomUUID() });
+    await tap(mineToken, trip, { progress: 'PICKUP LOCATION', idempotencyKey: randomUUID() });
+
     const key = randomUUID();
     const undo = () => call(`/api/driver/trips/${trip}/undo`, mineToken, {
       method: 'POST', body: JSON.stringify({ idempotencyKey: key }),
     });
-    assert.equal((await undo()).body.data.progress, '');
-    assert.equal((await undo()).body.data.progress, '', 'a re-sent undo changes nothing further');
+    assert.equal((await undo()).body.data.progress, 'IN ROUTE');
+    assert.equal((await undo()).body.data.progress, 'IN ROUTE', 'a re-sent undo steps back no further');
+
+    const [{ c }] = await sql`SELECT count(*)::int c FROM trip_events
+      WHERE trip_id = ${trip} AND kind = 'driver_undo'`;
+    assert.equal(c, 1, 'one undo recorded, not two');
   });
 
   it("refuses to undo another driver's trip", async () => {
@@ -305,5 +314,157 @@ describe('undoing a tap', () => {
       method: 'POST', body: JSON.stringify({ idempotencyKey: randomUUID() }),
     });
     assert.equal(status, 404);
+  });
+});
+
+/**
+ * The cases an independent review found the first version of this suite could
+ * not see. Every one of them passed against code that was losing taps.
+ */
+describe('the ways a tap can be lost', () => {
+  it('applies both taps when two arrive together on one trip', async () => {
+    // The ordinary offline-queue drain pattern: commit one tap, send the next
+    // immediately. The loser used to spend its nonce, fail its update, and be
+    // answered "success" — the step gone, its stamp never written, its
+    // re-send permanently refused.
+    for (let round = 0; round < 6; round++) {
+      const trip = await makeTrip(mineId, await officeToday());
+      await Promise.all([
+        tap(mineToken, trip, { progress: 'IN ROUTE', idempotencyKey: randomUUID() }),
+        tap(mineToken, trip, { progress: 'PICKUP LOCATION', idempotencyKey: randomUUID() }),
+      ]);
+      const [row] = await sql`SELECT driver_progress, pickup_arrival_at FROM trips WHERE id = ${trip}`;
+      assert.equal(row!.driver_progress, 'pickup_location', `round ${round}: both taps must land`);
+      assert.ok(row!.pickup_arrival_at, `round ${round}: the stamp must be written`);
+    }
+  });
+
+  it('keeps one trip’s nonce out of another trip’s way', async () => {
+    const today = await officeToday();
+    const a = await makeTrip(mineId, today);
+    const b = await makeTrip(mineId, today);
+    const shared = 'a-phone-numbering-taps-per-trip';
+
+    const first = await tap(mineToken, a, { progress: 'IN ROUTE', idempotencyKey: shared });
+    const second = await tap(mineToken, b, { progress: 'IN ROUTE', idempotencyKey: shared });
+
+    assert.equal(first.body.data.applied, true);
+    assert.equal(second.body.data.applied, true, "the second trip's tap must not be swallowed");
+    const [rowB] = await sql`SELECT driver_progress FROM trips WHERE id = ${b}`;
+    assert.equal(rowB!.driver_progress, 'in_route');
+  });
+
+  it('does not let an undo borrow a tap’s nonce', async () => {
+    const trip = await makeTrip(mineId, await officeToday());
+    const key = 'shared-between-tap-and-undo';
+    await tap(mineToken, trip, { progress: 'IN ROUTE', idempotencyKey: key });
+    await tap(mineToken, trip, { progress: 'PICKUP LOCATION', idempotencyKey: randomUUID() });
+
+    const { body } = await call(`/api/driver/trips/${trip}/undo`, mineToken, {
+      method: 'POST', body: JSON.stringify({ idempotencyKey: key }),
+    });
+    assert.equal(body.data.undone, true, 'the undo must not be mistaken for the earlier tap');
+    assert.equal(body.data.progress, 'IN ROUTE');
+  });
+
+  it('records a skipped step rather than losing the gap silently', async () => {
+    const trip = await makeTrip(mineId, await officeToday());
+    await tap(mineToken, trip, { progress: 'COMPLETE', idempotencyKey: randomUUID() });
+    const notes = await sql`SELECT value FROM trip_events WHERE trip_id = ${trip} AND kind = 'note'`;
+    assert.equal(notes.length, 1, 'the skipped steps are flagged for the office');
+    assert.match(notes[0]!.value, /IN ROUTE/);
+  });
+});
+
+describe('steps that are not steps', () => {
+  for (const bogus of ['', 'constructor', 'toString', '__proto__', 'valueOf', 'hasOwnProperty']) {
+    it(`refuses ${JSON.stringify(bogus)} instead of calling it already done`, async () => {
+      const trip = await makeTrip(mineId, await officeToday());
+      const { status, body } = await tap(mineToken, trip, { progress: bogus, idempotencyKey: randomUUID() });
+      assert.equal(status, 400, 'a step that does not exist is a validation error');
+      assert.equal(body.reason, 'validation');
+    });
+  }
+
+  it('refuses a mangled trip id as "not yours", not a server error', async () => {
+    for (const id of ['hello', '123', 'not-a-uuid-at-all']) {
+      const { status, body } = await tap(mineToken, id, { progress: 'IN ROUTE', idempotencyKey: randomUUID() });
+      assert.equal(status, 404, `${id} should read as not found`);
+      assert.equal(body.ok, false);
+    }
+  });
+});
+
+describe('a trip that crosses midnight', () => {
+  it('can still be tapped the next morning while it is unfinished', async () => {
+    const [row] = await sql`SELECT to_char(((now() AT TIME ZONE 'America/New_York') - interval '1 day')::date, 'YYYY-MM-DD') d`;
+    const trip = await makeTrip(mineId, row!.d, '23:45');
+    await sql`UPDATE trips SET driver_progress = 'in_transit' WHERE id = ${trip}`;
+
+    const { status, body } = await tap(mineToken, trip, { progress: 'COMPLETE', idempotencyKey: randomUUID() });
+    assert.equal(status, 200, 'the driver is physically inside this trip');
+    assert.equal(body.data.applied, true);
+    const [after] = await sql`SELECT dropoff_departure_at FROM trips WHERE id = ${trip}`;
+    assert.ok(after!.dropoff_departure_at, 'the drop-off must be stamped');
+  });
+
+  it('closes the day once that trip is finished', async () => {
+    const [row] = await sql`SELECT to_char(((now() AT TIME ZONE 'America/New_York') - interval '1 day')::date, 'YYYY-MM-DD') d`;
+    const trip = await makeTrip(mineId, row!.d);
+    await sql`UPDATE trips SET driver_progress = 'complete' WHERE id = ${trip}`;
+    const { status, body } = await tap(mineToken, trip, { progress: 'COMPLETE', idempotencyKey: randomUUID() });
+    assert.equal(status, 409);
+    assert.equal(body.reason, 'day-locked', 'a reason the phone can act on, not a silent discard');
+  });
+});
+
+describe('undo is bounded', () => {
+  it('refuses once the moment has passed, rather than erasing the record', async () => {
+    const trip = await makeTrip(mineId, await officeToday());
+    for (const progress of ['IN ROUTE', 'PICKUP LOCATION', 'INTRANSIT', 'DROPOFF LOCATION', 'COMPLETE']) {
+      await tap(mineToken, trip, { progress, idempotencyKey: randomUUID() });
+    }
+    // Age the taps past the window: the driver's six seconds are long gone.
+    await sql`UPDATE trip_events SET occurred_at = now() - interval '10 minutes'
+      WHERE trip_id = ${trip} AND kind = 'driver_tap'`;
+
+    const { status, body } = await call(`/api/driver/trips/${trip}/undo`, mineToken, {
+      method: 'POST', body: JSON.stringify({ idempotencyKey: randomUUID() }),
+    });
+    assert.equal(status, 409);
+    assert.equal(body.reason, 'conflict');
+
+    const [row] = await sql`SELECT driver_progress, pickup_arrival_at, dropoff_departure_at
+      FROM trips WHERE id = ${trip}`;
+    assert.equal(row!.driver_progress, 'complete', 'the completed trip stands');
+    assert.ok(row!.pickup_arrival_at && row!.dropoff_departure_at, 'every stamp survives');
+  });
+
+  it('does not record an undo that did not happen', async () => {
+    const trip = await makeTrip(mineId, await officeToday());
+    await tap(mineToken, trip, { progress: 'IN ROUTE', idempotencyKey: randomUUID() });
+    await sql`UPDATE trip_events SET occurred_at = now() - interval '10 minutes' WHERE trip_id = ${trip}`;
+    await call(`/api/driver/trips/${trip}/undo`, mineToken, {
+      method: 'POST', body: JSON.stringify({ idempotencyKey: randomUUID() }),
+    });
+    const [{ c }] = await sql`SELECT count(*)::int c FROM trip_events WHERE trip_id = ${trip} AND kind = 'driver_undo'`;
+    assert.equal(c, 0, 'trip_events is what actually happened');
+  });
+});
+
+describe("the office's column is not the driver's", () => {
+  it('leaves dispatch_status untouched by a tap and an undo', async () => {
+    const trip = await makeTrip(mineId, await officeToday());
+    await sql`UPDATE trips SET dispatch_status = 'ready', dispatch_status_at = now(),
+      dispatch_status_by = 'office@example.com' WHERE id = ${trip}`;
+    const [before] = await sql`SELECT dispatch_status, dispatch_status_at, dispatch_status_by FROM trips WHERE id = ${trip}`;
+
+    await tap(mineToken, trip, { progress: 'IN ROUTE', idempotencyKey: randomUUID() });
+    await call(`/api/driver/trips/${trip}/undo`, mineToken, {
+      method: 'POST', body: JSON.stringify({ idempotencyKey: randomUUID() }),
+    });
+
+    const [after] = await sql`SELECT dispatch_status, dispatch_status_at, dispatch_status_by FROM trips WHERE id = ${trip}`;
+    assert.deepEqual(after, before, "the office's call on the trip is theirs alone");
   });
 });

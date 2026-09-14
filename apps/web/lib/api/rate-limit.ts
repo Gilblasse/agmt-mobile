@@ -48,19 +48,72 @@ export async function consume(
     RETURNING hits, EXTRACT(EPOCH FROM (window_started + make_interval(secs => ${windowSeconds}) - now()))::int AS retry_after
   `)) as unknown as Array<{ hits: number; retry_after: number }>;
 
+  void sweepOccasionally();
+
   if (!row || row.hits <= limit) return { allowed: true };
   return { allowed: false, retryAfterSeconds: Math.max(1, row.retry_after) };
 }
 
+const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
+const IPV6 = /^[0-9a-f:]{2,45}$/i;
+
+function isAddress(value: string): boolean {
+  if (IPV4.test(value)) return value.split('.').every((part) => Number(part) <= 255);
+  return IPV6.test(value) && value.includes(':');
+}
+
+/**
+ * How many proxies of our own sit in front of the app. Each appends one entry
+ * to `x-forwarded-for`, so this says how far from the right the real client is.
+ */
+const TRUSTED_PROXY_HOPS = Number(process.env.TRUSTED_PROXY_HOPS ?? '1');
+
 /**
  * Who is calling, as well as we can tell behind a proxy.
  *
- * `x-forwarded-for` is caller-controlled unless a trusted proxy rewrites it,
- * so this is a throttling hint and never an identity. The leftmost entry is
- * the original client where the chain is trustworthy.
+ * **The rightmost entries are the trustworthy ones.** An earlier version took
+ * the leftmost, which is whatever the caller sent: one host rotating a made-up
+ * header made sixty requests without ever being refused, and spoofing someone
+ * else's address locked *them* out for ten minutes — turning the control meant
+ * to protect a driver into the cheapest way to keep them out of their shift.
+ *
+ * The common proxy idiom (`$proxy_add_x_forwarded_for`) *appends* the peer it
+ * saw, so entry `n` from the right is the client as far as our own proxies can
+ * vouch for it. Anything further left was supplied by the caller.
+ *
+ * Nothing here is an identity. It is a throttling hint, and a caller who
+ * cannot be placed shares one bucket rather than getting a free pass.
  */
 export function callerKey(request: Request): string {
-  const forwarded = request.headers.get('x-forwarded-for');
-  const ip = forwarded?.split(',')[0]?.trim() || request.headers.get('x-real-ip') || 'unknown';
-  return ip.slice(0, 100);
+  const chain = (request.headers.get('x-forwarded-for') ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(isAddress);
+
+  const candidate = chain[Math.max(0, chain.length - TRUSTED_PROXY_HOPS)];
+  if (candidate) return candidate.slice(0, 45);
+
+  const real = request.headers.get('x-real-ip')?.trim();
+  if (real && isAddress(real)) return real.slice(0, 45);
+
+  // Unplaceable callers share a bucket. That is deliberate: a free pass here
+  // would be the bypass, and a bucket per unknown shape is how the table fills.
+  return 'unplaced';
+}
+
+/**
+ * Drops windows that have long since closed.
+ *
+ * Migration 0003 said a sweep could do this; nothing ran one, so every fresh
+ * bucket was a row that stayed forever. Called opportunistically rather than
+ * scheduled, because there is no scheduler yet and an unbounded table is worse
+ * than an occasional extra statement.
+ */
+async function sweepOccasionally(): Promise<void> {
+  if (Math.random() > 0.01) return;
+  try {
+    await db.execute(sql`DELETE FROM rate_limits WHERE window_started < now() - interval '1 hour'`);
+  } catch (error) {
+    console.error('could not sweep rate limits', error);
+  }
 }

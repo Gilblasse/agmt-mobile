@@ -112,3 +112,55 @@ the pull and then `lib/db/apply-citext.mjs`.
 honours the non-negotiables. `drizzle.config.ts` exists to pull types *out* of
 the database. The duplicate migration `drizzle-kit pull` emits alongside the
 schema is deleted, so there is only ever one definition of the schema.
+
+## A tap is decided under a lock on the trip row
+
+Everything that decides a tap's outcome happens inside one transaction holding
+`SELECT ... FOR UPDATE` on the trip. The first version read the current step
+before the transaction and spent the nonce unconditionally, so two taps
+arriving together left the loser's update matching nothing while its nonce was
+burned and it was told it had succeeded. That is a lost tap, and it happened in
+half of the attempts, from nothing more exotic than an offline queue draining
+two taps back to back.
+
+`packages/rules/src/rules/status.ts` already said the guard "belongs on the
+SERVER, inside the same lock as the row read", and sign-in already used a row
+lock for the same class of race. The tap was the one place it was not applied.
+
+## A nonce is unique within a trip, and within an operation
+
+Migration 0004. The scope was the whole table, so a phone numbering taps per
+trip destroyed another trip's tap; and a key reused for a tap and its undo made
+the undo look like a replay. Keys are now stored prefixed by operation and the
+index covers `(trip_id, idempotency_key)`.
+
+## A skipped step is recorded, not refused
+
+The guard stays monotonic rather than strictly sequential: the live system
+allows any forward move, and the rules are parity-checked against it, so
+refusing a skip would be a behaviour change from the system still invoicing
+real money. But a skip leaves the intermediate stamps blank, and a wait time is
+billed from those — so the gap is written as a `note` event naming the steps
+not tapped, rather than left for someone to notice.
+
+## Undo is bounded to sixty seconds
+
+The app offers six. Without a server-side window, undo was a ratchet in
+reverse: six calls stripped a completed trip back to nothing and blanked all
+four timestamps, hours later, for anyone holding the phone.
+
+## Yesterday's unfinished trips stay tappable
+
+A 23:45 pickup is still the trip the driver is inside at 00:10. Refusing it
+stranded overnight runs with the drop-off never stamped, and `validation` is not
+a reason a client retries, so the tap was discarded rather than queued. Today
+and yesterday-while-unfinished are tappable; tomorrow answers "not yet" and an
+older day answers `day-locked`.
+
+## Rate limiting counts from the right of `x-forwarded-for`
+
+The header arrives as the caller wrote it; a proxy appends what it saw. Trusting
+the leftmost entry meant one host rotating a made-up value was never refused,
+and that wearing someone else's address spent *their* budget. Entries are
+validated as addresses and counted `TRUSTED_PROXY_HOPS` from the right, and a
+caller who cannot be placed shares one bucket rather than getting a free pass.

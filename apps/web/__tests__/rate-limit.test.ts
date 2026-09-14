@@ -42,6 +42,29 @@ after(async () => {
 });
 
 describe('rate limiting', () => {
+  it('cannot be shaken off by rotating a made-up header', async () => {
+    // One host, sixty requests, a different invented address each time. The
+    // leftmost entry used to be trusted, so this walked straight through.
+    let refused = 0;
+    for (let i = 0; i < 60; i++) {
+      const res = await post('/api/driver/verify', { name: DRIVER, code: '000000' }, `junk-${i}-not-an-ip`);
+      if (res.status === 429) refused++;
+    }
+    assert.ok(refused > 0, 'a caller we cannot place must still be throttled');
+  });
+
+  it('cannot lock out someone else by wearing their address', async () => {
+    // The header arrives as the caller wrote it, with our own proxy's entry
+    // appended on the right. Trusting the left let anyone spend a victim's
+    // budget; the rightmost entry is the one a proxy vouches for.
+    const victim = '203.0.113.77';
+    for (let i = 0; i < 40; i++) {
+      await post('/api/driver/sign-in', { name: DRIVER }, `${victim}, 203.0.113.99`);
+    }
+    const theVictim = await post('/api/driver/sign-in', { name: DRIVER }, victim);
+    assert.notEqual(theVictim.status, 429, 'the spoofed address must not carry the attacker\u2019s count');
+  });
+
   it('refuses a caller who floods sign-in, and says when to come back', async () => {
     const ip = '203.0.113.10';
     for (let i = 0; i < SIGN_IN_LIMIT; i++) {

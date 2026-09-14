@@ -46,3 +46,52 @@ deterministic `ORDER BY` was added; requiring all identifiers to agree is
 still open. `authenticateDriver` answers *who*, not *what they may touch*: the
 first trip endpoint must extend it with per-resource ownership, per docs/02
 §1.7, which is where the old system let one driver complete another's trip.
+
+## Phase 2, slice 2 — the tap flow and rate limiting (adversarial review)
+
+Three blockers, eight major findings. **All 51 tests passed with every one of
+them present**, which is the more important result: the suite was not testing
+the failure modes that matter. Each fix below was re-verified by re-running the
+reviewer's own attack.
+
+| # | Finding | Disposition |
+|---|---|---|
+| B1 | Two taps racing on one trip: the guard was computed before the transaction and the nonce spent unconditionally, so the loser's update matched nothing, its nonce was burned, and it was answered **success**. The step was gone, its stamp never written, its re-send permanently refused. Lost in 3 of 6 rounds — by the ordinary offline-queue drain pattern. | **Fixed** — the trip row is locked inside the transaction and the guard recomputed there; the nonce is spent only once the tap is going to apply. Re-run: **0 of 6 rounds lost.** |
+| B2 | The idempotency index was global, not per-trip, so one nonce reused across two trips silently ate the second tap. The guarantee rested on a phone never reusing a string. | **Fixed** — migration 0004 scopes the index to `(trip_id, idempotency_key)`. Both trips now apply. Tap and undo nonces are additionally namespaced, so one key used for both means two different things. |
+| B3 | Undo wrote its event before knowing the update applied, so an undo that changed nothing still recorded that it had and answered success — with no `applied` flag for a client to notice. | **Fixed** — same lock; the event is written only when the undo will take effect. `undone` added to the response. |
+| M4 | A trip crossing midnight became untappable: the drop-off was never stamped and the tap was discarded, because `validation` is not a reason a client retries. Overnight discharges and dialysis returns are routine. | **Fixed** — yesterday's unfinished trips stay tappable. Tomorrow answers `validation` ("not yet"), a closed day answers `day-locked` — both distinguishable, neither silent. |
+| M5 | Undo was unbounded: six calls stripped a completed trip to nothing and blanked all four timestamps — the record payroll and invoices are read from — hours later. | **Fixed** — a 60-second server window (the app offers six). Re-run: six undos leave a completed trip at 4/4 stamps. |
+| M6 | `officeTomorrow` added 86,400,000 ms, which skips a day across a 23-hour DST day — on the Saturday evening before the clocks change, Sunday's shift vanished. | **Fixed** — uses `addDays` from the rules package, which walks date keys and never touches UTC. |
+| M7 | Rate limiting was bypassed entirely by one host rotating a made-up header: 60 requests, 0 refused. It trusted the **leftmost** `x-forwarded-for` entry, which is whatever the caller sent — and the common appending-proxy idiom leaves the attacker's value there. | **Fixed** — entries are validated as addresses and counted from the right, `TRUSTED_PROXY_HOPS` hops in; an unplaceable caller shares one bucket rather than getting a free pass. |
+| M8 | Spoofing a victim's address locked *them* out for ten minutes — the control meant to protect a driver became the cheapest way to keep them out of a shift. Junk headers also inserted unbounded rows. | **Fixed** — closes with M7; a sweep now actually runs rather than being described in a comment. |
+| M9 | `value in TO_DB` walked the prototype chain, so `constructor`, `toString` and `__proto__` were answered "already applied" — a corrupted queue item dropped instead of reported. | **Fixed** — uses `DRIVER_STEPS`, which existed for exactly this and was dead code. |
+| M10 | The guard is monotonic but not sequential, so one tap could jump to COMPLETE leaving the intermediate stamps blank. | **Changed, deliberately not restricted.** The live system allows any forward move and the rules are parity-checked against it, so refusing a skip would be a behaviour change from the proven system. The gap is now recorded as a `note` event for the office instead. |
+| M11 | The undo idempotency test never reached the nonce check — deleting the handling entirely left it passing. Concurrency, cross-trip nonces, DST, overnight trips and the office column were untested. | **Fixed** — rewritten to start two steps up and assert one recorded undo. 16 new cases; 51 → 69. |
+
+### Minor — fixed
+
+A non-UUID trip id returned 500 instead of "not on your schedule" (m12);
+`progressToRules` returned `undefined` for an unmapped label, which walks
+through `canAdvance` as rank 0 and disables the guard — now throws (m13); the
+no-op path echoed a pre-lock snapshot instead of re-reading (m15); the body was
+parsed before authenticating (OPTIONAL, taken).
+
+### Minor — recorded, not actioned
+
+Framework-level non-envelope responses: a `GET` on a POST-only route returns an
+empty 405, and an unmatched path returns Next's HTML 404 (m16). `withResult`
+cannot cover either; needs explicit method handlers and a catch-all.
+`day/route.ts` omits `version` and the `BoardTrip` fields the contract names
+(m17) — carried with the existing `driverVerify` contract drift. `retry-after`
+reveals when the window opened (m18). No rate limit on the authenticated
+endpoints, so a leaked token can scrape unthrottled. Trip payloads hand the
+phone the full row including `medicaidNo` and an office email — contract-
+sanctioned, but worth revisiting for a PHI system before the app ships.
+
+### Clean, confirmed by the reviewer
+
+`dispatch_status` vs `driver_progress` (non-negotiable #1) — five taps and an
+undo left the office's three columns byte-identical. Ownership — another
+driver's trip, an unassigned trip and a nonexistent id all answer identically,
+with no timing oracle. Server-clock stamps. The rate-limit upsert is genuinely
+atomic (45 concurrent requests, 45 hits). No SQL injection anywhere.

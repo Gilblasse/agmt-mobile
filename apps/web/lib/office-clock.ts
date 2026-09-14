@@ -1,4 +1,4 @@
-import { officeDateKey } from '@ag/rules';
+import { addDays, officeDateKey } from '@ag/rules';
 
 /**
  * The office's timezone decides what day it is — never the phone's, never the
@@ -16,7 +16,37 @@ export function officeToday(now = new Date()) {
 }
 
 export function officeTomorrow(now = new Date()) {
-  return officeDateKey(new Date(now.getTime() + 86_400_000), OFFICE_TIME_ZONE);
+  // Adding 24 hours in milliseconds is wrong across a daylight-saving change:
+  // on a 23-hour local day it lands on the day after tomorrow, so on the
+  // Saturday evening before the clocks go forward a driver checking ahead saw
+  // Monday's trips and Sunday's shift disappeared. `addDays` walks date keys
+  // and never touches UTC or a DST boundary.
+  return addDays(officeToday(now), 1);
+}
+
+/** Yesterday, for a trip that began before midnight and is still running. */
+export function officeYesterday(now = new Date()) {
+  return addDays(officeToday(now), -1);
+}
+
+/**
+ * May a driver still tap this trip?
+ *
+ * Today, always. Yesterday, only while the trip is unfinished — a 23:45 pickup
+ * is still the trip the driver is physically inside at 00:10, and refusing it
+ * left overnight runs with their drop-off never stamped and the tap thrown
+ * away. Anything older belongs to the office.
+ */
+export function tappability(
+  serviceDate: string,
+  driverProgress: string,
+  now = new Date(),
+): 'ok' | 'not-yet' | 'closed' {
+  const today = officeToday(now);
+  if (serviceDate === today) return 'ok';
+  if (serviceDate > today) return 'not-yet';
+  if (serviceDate === officeYesterday(now) && driverProgress !== 'complete') return 'ok';
+  return 'closed';
 }
 
 /** What the phone needs to correct its own clock: the instant, and the wall time here. */

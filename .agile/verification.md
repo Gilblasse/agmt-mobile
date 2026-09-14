@@ -97,7 +97,7 @@ authorised `/api/driver/me` → driver marked inactive → same token refused wi
 
 ## Rate limiting
 
-5 tests, all passing, plus the 26 sign-in tests re-run as a regression.
+7 tests, all passing, plus the sign-in suite re-run as a regression.
 
 Covered: a caller flooding `sign-in` or `verify` is refused with `busy` and a
 `Retry-After`; limits are per caller, so one attacker does not lock out anyone
@@ -115,10 +115,18 @@ the 26 sign-in tests, because they all shared one caller bucket. That is not
 only a test artefact — a depot of drivers on one WiFi shares a public IP too.
 Limits were raised to 30 and the reasoning written where they are set.
 
+**Found by review:** the limit was bypassed completely by one host rotating a
+made-up header (60 requests, 0 refused), and spoofing a victim's address locked
+*them* out — the control meant to protect a driver was the cheapest way to keep
+them out of a shift. Both are covered by tests now.
+
 ## The driver's day and the tap flow
 
-20 tests, all passing, and the 31 earlier tests re-run as regression — 51 in
-total against a real PostgreSQL and a real server.
+36 tests, all passing, and the 33 earlier tests re-run as regression — **69 in
+total** against a real PostgreSQL and a real server. An independent adversarial
+review found three blockers and eight major issues in the first version; all
+are fixed and re-verified by re-running the reviewer's attacks, not by trusting
+the suite. Dispositions in `review-findings.md`.
 
 **The day:** only this driver's trips, for the office's date — another
 driver's and an unassigned trip are both absent. Every payload carries
@@ -151,6 +159,25 @@ let one driver complete another's:
 **Undo** steps back exactly one place and clears the stamp as well as the
 step — leaving the stamp behind let the step re-assert itself on the next
 read. A re-sent undo changes nothing further.
+
+**The failure modes the first suite could not see**, each re-run against the fix:
+
+- Two taps arriving together on one trip: **0 of 6 rounds lose a tap** (3 of 6
+  before). Both steps land and both stamps are written.
+- One nonce reused across two trips: both apply (the second was swallowed).
+- A nonce shared between a tap and its undo: the undo is not mistaken for a
+  replay.
+- Six undos on a completed trip after the window: refused with `conflict`, and
+  the trip keeps **4/4 stamps** (all four were being erased).
+- A trip that began at 23:45 yesterday and is still running: still tappable,
+  drop-off stamped. A finished old day answers `day-locked`; tomorrow answers
+  `validation` — distinguishable, neither discarded silently.
+- `''`, `constructor`, `toString`, `__proto__`, `valueOf`, `hasOwnProperty` as
+  a step: all `400 validation` (all six were answered "already applied").
+- A mangled trip id: `404`, not a 500.
+- A skipped step records a `note` event naming the steps not tapped.
+- `dispatch_status`, `dispatch_status_at` and `dispatch_status_by` are
+  byte-identical after a tap and an undo.
 
 Demonstrated by hand end to end: sign in, open the day, tap all five steps,
 re-send an already-delivered tap five times (5 events recorded, not 10), then

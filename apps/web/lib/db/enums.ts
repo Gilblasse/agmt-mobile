@@ -38,7 +38,23 @@ const TO_DB = Object.fromEntries(
 ) as Readonly<Record<DriverProgress, DriverProgressLabel>>;
 
 export function progressToRules(label: DriverProgressLabel): DriverProgress {
-  return TO_RULES[label];
+  const progress = TO_RULES[label];
+  // An unmapped label would otherwise return undefined, and undefined walks
+  // straight through `canAdvance` as rank 0 — every tap would look like an
+  // advance and the guard would be gone. Better to fail loudly than to lose
+  // taps quietly if the enum ever grows a value this map does not know.
+  if (progress === undefined) {
+    throw new Error(`Unknown driver_progress label from the database: ${String(label)}`);
+  }
+  return progress;
+}
+
+/** Narrows a raw database string to a label, refusing anything unmapped. */
+export function toLabel(value: string): DriverProgressLabel {
+  if (!(Object.prototype.hasOwnProperty.call(TO_RULES, value))) {
+    throw new Error(`Unknown driver_progress label from the database: ${value}`);
+  }
+  return value as DriverProgressLabel;
 }
 
 export function progressToDb(progress: DriverProgress): DriverProgressLabel {
@@ -54,6 +70,16 @@ export const DRIVER_STEPS: readonly DriverProgress[] = [
   'COMPLETE',
 ];
 
-export function isDriverProgress(value: unknown): value is DriverProgress {
-  return typeof value === 'string' && value in TO_DB;
+/**
+ * Is this one of the five steps a driver can actually tap?
+ *
+ * `value in TO_DB` looked equivalent and was not: `in` walks the prototype
+ * chain, so `'constructor'`, `'toString'` and `'__proto__'` all passed as
+ * steps and the server answered a phone that a step which does not exist had
+ * already landed — quietly dropping a corrupted queue item instead of
+ * reporting it. `''` is a real `DriverProgress` but is not something anyone
+ * taps, so it does not belong here either.
+ */
+export function isDriverStep(value: unknown): value is DriverProgress {
+  return typeof value === 'string' && DRIVER_STEPS.includes(value as DriverProgress);
 }
