@@ -5,15 +5,31 @@
   "type": "module",
   "description": "Business rules ported from the live Apps Script system: pricing, time, status, driver identity, money, recurrence. Pure and dependency-free so the phone and the server share one implementation.",
   "exports": {
-    ".": { "types": "./dist/src/rules/index.d.ts", "default": "./dist/src/rules/index.js" },
-    "./types": { "types": "./dist/src/types/index.d.ts", "default": "./dist/src/types/index.js" }
+    ".": {
+      "types": "./dist/src/rules/index.d.ts",
+      "default": "./dist/src/rules/index.js"
+    },
+    "./types": {
+      "types": "./dist/src/types/index.d.ts",
+      "default": "./dist/src/types/index.js"
+    },
+    "./api": {
+      "types": "./dist/src/api/contract.d.ts",
+      "default": "./dist/src/api/contract.js"
+    }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
+    "prepare": "tsc",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "tsc && node --test \"dist/test/*.test.js\"",
     "parity": "tsc && node tools/parity.mjs",
     "verify": "bun run typecheck && bun run test && bun run parity"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
   }
 }

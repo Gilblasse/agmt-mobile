@@ -17,7 +17,7 @@
     "typecheck": "tsc --noEmit",
     "export:ios": "expo export --platform ios",
     "export:android": "expo export --platform android",
-    "export:all": "expo export --platform ios && expo export --platform android"
+    "export:all": "expo export --platform ios --platform android"
   },
   "private": true,
   "devDependencies": {

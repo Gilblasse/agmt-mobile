@@ -12,10 +12,17 @@ mispricing a trip.
 the parity-tested rules package is shared, unchanged, by an Expo app and a
 Next.js app, with the parity harness green in CI.
 
-**Status:** Iteration complete and locally verified. Not yet pushed — the remote
-repo `Gilblasse/agmt-mobile` is being created by the owner.
+**Status:** Iteration complete, locally verified, and independently reviewed.
+The review found no blockers and six major findings; all six are resolved or
+escalated (see `review-findings.md`). Not yet pushed.
 
-**Next action:** Push to the remote once it exists, then confirm CI is green.
+**Next action:** Resolve the one open question below, push, confirm CI is green.
+
+**Open decision blocking the push:** the repo is public, and
+`packages/rules/legacy/` contains the live Apps Script — including the live
+driver-app deployment URL and seven spreadsheet IDs for a system holding
+patient names, addresses and Medicaid numbers. Confirm public is intended, or
+make the repo private, before the first push.
 Phase 2 is the API skeleton: `drizzle-kit pull` against `0001_init.sql`, then
 endpoints starting with auth and `driver_sessions`.
 

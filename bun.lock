@@ -41,6 +41,9 @@
     "packages/rules": {
       "name": "@ag/rules",
       "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "^5.9.3",
+      },
     },
   },
   "packages": {
