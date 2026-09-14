@@ -56,7 +56,13 @@ jobs:
 
       - name: Apply the schema
         run: |
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/0001_init.sql
+          # Every migration, in order. Naming them one by one meant a new
+          # migration was silently left out and the tests ran against a schema
+          # missing the constraint they depend on.
+          for f in db/migrations/*.sql; do
+            echo "applying $f"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/smoke.sql
 
       - name: Build web
