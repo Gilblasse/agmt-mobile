@@ -109,6 +109,7 @@ const NOT_THIS_MESSAGE = new Set([
   21612, // this sender cannot reach that number
   30001, // queue overflow
   30002, // the account is suspended
+  30034, // US A2P 10DLC: this number has no approved campaign — days of registration, not a retry
 ]);
 
 /**

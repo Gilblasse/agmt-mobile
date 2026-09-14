@@ -33,7 +33,14 @@ const providerDown = (error = 'no provider') =>
 const failsWith = (error: string, permanent = false) =>
   fakeSender(() => ({ accepted: false, error, permanent }));
 
-async function queue(body = 'hello', sendAfter = 'now()'): Promise<string> {
+/**
+ * `send_after` is a second in the past, not `now()`. The drain claims with
+ * `send_after <= now()`, and two `now()`s a statement apart are not guaranteed
+ * to be ordered on a virtual machine whose clock the host keeps correcting —
+ * a row queued "now" was found not yet due a microsecond later, on a Windows
+ * Docker Desktop, once in three runs. A second ago is due everywhere.
+ */
+async function queue(body = 'hello', sendAfter = "now() - interval '1 second'"): Promise<string> {
   const [row] = await sql.unsafe(
     `INSERT INTO notifications (channel, recipient, body, send_after)
      VALUES ('sms', '8455550000', $1, ${sendAfter}) RETURNING id`,
@@ -553,10 +560,13 @@ describe('when nobody knows whether it was sent', () => {
   });
 
   it('counts messages the provider took and never reported on', async () => {
-    const id = await queue('taken, never heard of again');
+    // Set up the exact state being counted, rather than getting there through
+    // a drain: this test is about the count, and routing it through a claim
+    // made it depend on two clocks agreeing to the microsecond.
+    await sql`INSERT INTO notifications (channel, recipient, body, state, provider_ref, sent_at)
+      VALUES ('sms', '8455550000', 'taken, never heard of again', 'accepted', 'SM_silent',
+              now() - interval '1 hour')`;
     delivers();
-    await drainOutbox();
-    await sql`UPDATE notifications SET sent_at = now() - interval '1 hour' WHERE id = ${id}`;
     const result = await drainOutbox();
     assert.ok(result.unconfirmed >= 1, 'a message stuck at accepted is not silent');
   });

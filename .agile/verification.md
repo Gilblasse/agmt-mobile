@@ -331,14 +331,48 @@ the head of the queue.
 startup with a message naming the setting, rather than becoming `NaN` and
 defeating the assertion that a send cannot outlast a claim.
 
+## On the owner's machine, with the internet
+
+Cloned to Windows 11 and run there, which the Linux sandbox could not do.
+
+- **The parity harness had never run on Windows** — `import()` of a `C:\...`
+  path is refused by Node as a URL with scheme `c:`. Fixed with
+  `pathToFileURL`; then **1,778,112 quotes and 6,084 names, identical**, on
+  the owner's hardware.
+- **All eight migrations and the smoke test** against `postgres:16-alpine` in
+  Docker Desktop — the same image CI uses.
+- **The full API suite, 176 tests, three consecutive clean runs** against
+  that container and a built Next server. The first run failed one test, once:
+  a row queued with `send_after = now()` was not yet due at the next
+  statement's `now()`, because the Docker VM's clock is corrected by the host
+  and two `now()`s a statement apart are not guaranteed ordered. Harmless in
+  production (the message goes on the next drain); the test helper now queues
+  a second in the past, and the one test that depended on a drain to reach
+  `accepted` sets that state up directly.
+- **The Twilio signature check agrees with Twilio's own SDK** on every case
+  tried — plain, unicode, URL-special characters, an empty body, unsorted keys
+  and repeated keys — using `twilio.getExpectedTwilioSignature` and
+  `twilio.validateRequest` as the independent implementation. The previous
+  review's deferred concern about repeated-key joining does not apply: the SDK
+  concatenates them the same way.
+- **The Twilio API facts the adapter relies on**, checked against the
+  official docs rather than memory: `date_created` is RFC 2822 (and
+  `Date.parse` reads it); the list filters are `To`, `From`, `DateSent`,
+  `PageSize`; the 201 body carries `sid`, `status` and `error_code`;
+  `canceled` is a real status; and the meanings of 21214, 21408, 21606,
+  21612, 20005, 20429, 21617, 30001, 30002 and 30034 are as the code
+  classifies them. 30034 (A2P 10DLC, unregistered) was added to the
+  account-problem set on the strength of that check.
+- **Both mobile bundles export** (Android and iOS Hermes bytecode, 1.5 MB
+  each), as in CI.
+
 ## Not verified
 
 - `expo-sqlite` cold-start with a corrupt row — no offline queue exists yet.
 - Anything needing a device or simulator. The bundles export; they have not
   been launched on a phone.
-- A real Twilio account: a real send, a real status callback arriving over the
-  network, and Twilio's own signature (the scheme is implemented from its
-  specification and tested against an independent implementation of it here,
-  which is not the same as having accepted a genuine request).
+- A real Twilio account: a real send, and a real status callback arriving over
+  the network. The signature scheme now agrees with Twilio's own SDK, which is
+  as close as it gets without a genuine request.
 - Email delivery of a sign-in code. There is no provider, which is an unmet
   `[must]` (`docs/07-feature-checklist.md:182`), not a gap in testing.
