@@ -1,6 +1,7 @@
 import { pricingDefaults, quote, quoteOptions } from '@ag/rules';
 import type { Result } from '@ag/rules/api';
 import type { Quote, QuoteOptions, Trip } from '@ag/rules/types';
+import { onlyPost } from '@/lib/api/result';
 
 /**
  * POST /api/pricing/quote — `getQuote` in the API contract.
@@ -86,3 +87,5 @@ export async function POST(request: Request) {
     return fail('internal', 'The price could not be worked out.', 500);
   }
 }
+
+export const { GET, PUT, PATCH, DELETE } = onlyPost;

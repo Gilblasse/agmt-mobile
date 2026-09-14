@@ -1,5 +1,5 @@
 import { authenticateDriver } from '@/lib/auth/driver';
-import { fail, ok, PRIVATE, withResult } from '@/lib/api/result';
+import { fail, ok, PRIVATE, withResult, onlyGet} from '@/lib/api/result';
 
 /**
  * GET /api/driver/me — who this phone is signed in as.
@@ -23,3 +23,5 @@ export const GET = withResult(async (request: Request) => {
   }
   return ok({ driver: auth.driver }, PRIVATE);
 });
+
+export const { POST, PUT, PATCH, DELETE } = onlyGet;

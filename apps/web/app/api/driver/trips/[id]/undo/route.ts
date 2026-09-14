@@ -4,7 +4,7 @@ import { stampFieldFor, undoTarget } from '@ag/rules';
 import { db } from '@/lib/db';
 import { tripEvents, trips } from '@/lib/db/schema';
 import { authorizeDriverForTrip, refusalMessage } from '@/lib/auth/driver';
-import { fail, ok, PRIVATE, readJson, UNREADABLE, withResult } from '@/lib/api/result';
+import { fail, ok, PRIVATE, readJson, UNREADABLE, withResult, onlyPost} from '@/lib/api/result';
 import { progressToDb, progressToRules, toLabel } from '@/lib/db/enums';
 import { tappability } from '@/lib/office-clock';
 
@@ -129,3 +129,5 @@ export const POST = withResult(async (request: Request) => {
 function withProgress<T extends { driverProgress: string }>(trip: T) {
   return { ...trip, progress: progressToRules(toLabel(trip.driverProgress)) };
 }
+
+export const { GET, PUT, PATCH, DELETE } = onlyPost;

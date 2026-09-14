@@ -2,7 +2,7 @@ import { and, desc, eq, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/lib/db';
 import { driverSignInCodes, drivers, notifications } from '@/lib/db/schema';
-import { fail, ok, readJson, tooBusy, UNREADABLE, withResult } from '@/lib/api/result';
+import { fail, ok, readJson, tooBusy, UNREADABLE, withResult, onlyPost} from '@/lib/api/result';
 import { callerKey, consume } from '@/lib/api/rate-limit';
 import { hashCode, newSignInCode } from '@/lib/auth/tokens';
 
@@ -144,3 +144,5 @@ export const POST = withResult(async (request: Request) => {
 
   return ok(SENT);
 });
+
+export const { GET, PUT, PATCH, DELETE } = onlyPost;

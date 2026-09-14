@@ -2,7 +2,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { trips } from '@/lib/db/schema';
 import { authenticateDriver } from '@/lib/auth/driver';
-import { fail, ok, PRIVATE, withResult } from '@/lib/api/result';
+import { fail, ok, PRIVATE, withResult, onlyGet} from '@/lib/api/result';
 import { progressToRules, type DriverProgressLabel } from '@/lib/db/enums';
 import { officeToday, officeTomorrow, serverClock } from '@/lib/office-clock';
 import { timeSortValue } from '@ag/rules';
@@ -51,10 +51,20 @@ export const GET = withResult(async (request: Request) => {
     (a, b) => timeSortValue(a.scheduledTime) - timeSortValue(b.scheduledTime),
   );
 
+  // Changes whenever anything on this driver's day changes, so the phone can
+  // poll cheaply and skip a redraw when nothing has moved. Derived rather than
+  // stored: the newest `updated_at` on the day plus how many trips there are
+  // catches an edit, an addition and a removal alike.
+  const version = `${rows.length}:${rows.reduce(
+    (newest, trip) => (trip.updatedAt > newest ? trip.updatedAt : newest),
+    '',
+  )}`;
+
   return ok(
     {
       driver: auth.driver,
       date,
+      version,
       readOnly: which === 'tomorrow',
       trips: ordered.map((trip) => ({
         ...trip,
@@ -65,3 +75,5 @@ export const GET = withResult(async (request: Request) => {
     PRIVATE,
   );
 });
+
+export const { POST, PUT, PATCH, DELETE } = onlyGet;

@@ -2,7 +2,7 @@ import { and, eq, gt, isNull, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/lib/db';
 import { driverSessions, driverSignInCodes, drivers } from '@/lib/db/schema';
-import { fail, ok, PRIVATE, readJson, tooBusy, UNREADABLE, withResult } from '@/lib/api/result';
+import { fail, ok, PRIVATE, readJson, tooBusy, UNREADABLE, withResult, onlyPost} from '@/lib/api/result';
 import { callerKey, consume } from '@/lib/api/rate-limit';
 import { codeMatches, hashToken, newSessionToken } from '@/lib/auth/tokens';
 import { revokeSessionsBeyondLimit, SESSION_TTL_DAYS } from '@/lib/auth/driver';
@@ -128,3 +128,5 @@ export const POST = withResult(async (request: Request) => {
 
   return ok({ token, driver }, PRIVATE);
 });
+
+export const { GET, PUT, PATCH, DELETE } = onlyPost;

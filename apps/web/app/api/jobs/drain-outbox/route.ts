@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { drainOutbox } from '@/lib/notifications/outbox';
-import { fail, ok, withResult } from '@/lib/api/result';
+import { fail, ok, withResult, onlyPost} from '@/lib/api/result';
 
 /**
  * POST /api/jobs/drain-outbox — sends whatever is queued and due.
@@ -41,3 +41,5 @@ function sameSecret(offered: string, expected: string): boolean {
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
 }
+
+export const { GET, PUT, PATCH, DELETE } = onlyPost;

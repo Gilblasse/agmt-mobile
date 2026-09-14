@@ -79,3 +79,17 @@ export function tooBusy(retryAfterSeconds: number): Response {
 export const PRIVATE: ResponseInit = {
   headers: { 'cache-control': 'no-store, private', vary: 'authorization' },
 };
+
+/**
+ * The other verbs on a route that only answers one.
+ *
+ * The framework's own 405 has an empty body and no content-type, which a
+ * client that always parses JSON chokes on. Spread this into a route so every
+ * method answers the envelope:
+ *
+ *   export const { GET, PUT, PATCH, DELETE } = onlyPost;
+ */
+const wrongMethod = () => fail('validation', 'That is not something you can do at this address.', 405);
+
+export const onlyPost = { GET: wrongMethod, PUT: wrongMethod, PATCH: wrongMethod, DELETE: wrongMethod };
+export const onlyGet = { POST: wrongMethod, PUT: wrongMethod, PATCH: wrongMethod, DELETE: wrongMethod };

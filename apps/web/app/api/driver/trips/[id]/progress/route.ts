@@ -5,7 +5,7 @@ import { DRIVER_STEP_RANK } from '@ag/rules/types';
 import { db } from '@/lib/db';
 import { tripEvents, trips } from '@/lib/db/schema';
 import { authorizeDriverForTrip, refusalMessage } from '@/lib/auth/driver';
-import { fail, ok, PRIVATE, readJson, UNREADABLE, withResult } from '@/lib/api/result';
+import { fail, ok, PRIVATE, readJson, UNREADABLE, withResult, onlyPost} from '@/lib/api/result';
 import { isDriverStep, progressToDb, progressToRules, toLabel } from '@/lib/db/enums';
 import { tappability } from '@/lib/office-clock';
 
@@ -173,3 +173,5 @@ function stepsBetween(from: string, to: string): string[] {
     return r > a && r < b;
   });
 }
+
+export const { GET, PUT, PATCH, DELETE } = onlyPost;

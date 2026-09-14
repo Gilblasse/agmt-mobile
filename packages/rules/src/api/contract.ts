@@ -123,13 +123,45 @@ export interface Api {
   getTripActivity(id: string): Promise<Result<TripEvent[]>>;
 
   // -- the driver app ------------------------------------------------------
-  /** POST /api/driver/sign-in — replaces the emailed sign-in code. */
-  driverSignIn(input: { email?: string; phone?: string }): Promise<Result<{ sent: true }>>;
-  driverVerify(input: { code: string }): Promise<Result<{ token: string; driver: Driver }>>;
+  /**
+   * POST /api/driver/sign-in — replaces the emailed sign-in code.
+   *
+   * A driver names themselves however they can: the roster picker sends a
+   * name, a driver who knows their own details can send either. The reply is
+   * always the same `{ sent: true }`, for every caller — a different answer
+   * for an unknown name turns this into a way to read the roster.
+   */
+  driverSignIn(input: { name?: string; email?: string; phone?: string }): Promise<Result<{ sent: true }>>;
 
-  /** GET /api/driver/day — replaces `getDriverTrips`. One driver, one day. */
+  /**
+   * POST /api/driver/verify.
+   *
+   * Takes an identifier as well as the code. This was once typed as the code
+   * alone, which would put every driver signing in at that moment into one
+   * six-digit space — the per-code attempt limit would protect an individual
+   * code while doing nothing about the space as a whole. The live system asks
+   * who you are too (`driverVerifyCode(name, code)`).
+   */
+  driverVerify(input: {
+    code: string;
+    name?: string;
+    email?: string;
+    phone?: string;
+  }): Promise<Result<{ token: string; driver: Driver }>>;
+
+  /**
+   * GET /api/driver/day — replaces `getDriverTrips`. One driver, one day.
+   *
+   * `version` changes whenever anything on this driver's day changes, so the
+   * phone can poll it cheaply and skip a redraw when nothing has moved.
+   * `serverNow` and `serverClock` are what the phone corrects its own clock
+   * against; `timeZone` says whose clock that is. `readOnly` marks a day the
+   * driver may look at but not tap.
+   */
   getDriverDay(q: { which: 'today' | 'tomorrow'; date?: DateKey }): Promise<Result<{
-    driver: Driver; date: DateKey; trips: BoardTrip[]; serverNow: string; serverClock: string; version: string;
+    driver: Driver; date: DateKey; trips: BoardTrip[];
+    serverNow: string; serverClock: string; timeZone: string;
+    readOnly: boolean; version: string;
   }>>;
 
   /**
@@ -150,8 +182,17 @@ export interface Api {
   /** POST /api/driver/trips/:id/undo — must clear the stamp AND the progress. */
   undoDriverProgress(id: string, input: { idempotencyKey: string }): Promise<Result<Trip>>;
 
-  /** POST /api/driver/trips/:id/eta — a relative offset in minutes, never an absolute time. */
-  reportEta(id: string, input: { minutesFromNow: number }): Promise<Result<{ noted: true }>>;
+  /**
+   * POST /api/driver/trips/:id/eta — a relative offset in minutes, never an
+   * absolute time. The office's clock turns it into a time on the board, so a
+   * phone with a wrong clock cannot write a wrong arrival into a note.
+   * `alreadyFlagged` says the board already carried a warning for this trip.
+   */
+  reportEta(id: string, input: {
+    minutesFromNow: number;
+    reason?: string;
+    note?: string;
+  }): Promise<Result<{ noted: true; arriving: string; alreadyFlagged: boolean }>>;
 
   // -- pricing -------------------------------------------------------------
   /** POST /api/pricing/quote — replaces `getPrivatePayQuote`. Pure; the server owns the arithmetic. */

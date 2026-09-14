@@ -468,3 +468,106 @@ describe("the office's column is not the driver's", () => {
     assert.deepEqual(after, before, "the office's call on the trip is theirs alone");
   });
 });
+
+describe('telling dispatch you are running late', () => {
+  const eta = (token: string, tripId: string, body: unknown) =>
+    call(`/api/driver/trips/${tripId}/eta`, token, { method: 'POST', body: JSON.stringify(body) });
+
+  it('turns the driver’s "minutes away" into a time on the office clock', async () => {
+    const trip = await makeTrip(mineId, await officeToday());
+    const { status, body } = await eta(mineToken, trip, { minutesFromNow: 15, reason: 'Traffic' });
+    assert.equal(status, 200);
+    assert.equal(body.data.noted, true);
+    // The phone sent a relative offset and never a clock time; the office
+    // worked out the time. A phone an hour out cannot write a wrong arrival.
+    assert.match(body.data.arriving, /^\d{1,2}:\d{2} (AM|PM)$/);
+
+    const [row] = await sql`SELECT notes FROM trips WHERE id = ${trip}`;
+    assert.match(row!.notes, /DRIVER RUNNING LATE: arriving about \d{1,2}:\d{2} (AM|PM) - Traffic/);
+  });
+
+  it('keeps whatever the office had already written on the trip', async () => {
+    const trip = await makeTrip(mineId, await officeToday());
+    await sql`UPDATE trips SET notes = 'Passenger uses a walker' WHERE id = ${trip}`;
+    await eta(mineToken, trip, { minutesFromNow: 5 });
+    const [row] = await sql`SELECT notes FROM trips WHERE id = ${trip}`;
+    assert.match(row!.notes, /Passenger uses a walker/, 'the office note survives');
+    assert.match(row!.notes, /DRIVER RUNNING LATE/);
+  });
+
+  it('does not stack identical warnings when the driver taps twice', async () => {
+    const trip = await makeTrip(mineId, await officeToday());
+    await eta(mineToken, trip, { minutesFromNow: 10 });
+    const second = await eta(mineToken, trip, { minutesFromNow: 20 });
+    assert.equal(second.body.data.alreadyFlagged, true);
+
+    const [row] = await sql`SELECT notes FROM trips WHERE id = ${trip}`;
+    assert.equal(row!.notes.match(/DRIVER RUNNING LATE/g).length, 1, 'one warning on the board');
+
+    // But both reports are in the trail, so "they told us twice" is answerable.
+    const [{ c }] = await sql`SELECT count(*)::int c FROM trip_events
+      WHERE trip_id = ${trip} AND kind = 'note'`;
+    assert.equal(c, 2);
+  });
+
+  it('strips anything that is not words out of the reason', async () => {
+    const trip = await makeTrip(mineId, await officeToday());
+    await eta(mineToken, trip, { minutesFromNow: 5, reason: 'Traffic <script>x</script> & "stuff"' });
+    const [row] = await sql`SELECT notes FROM trips WHERE id = ${trip}`;
+    assert.doesNotMatch(row!.notes, /[<>&"]/, 'the note is words only');
+    assert.match(row!.notes, /Traffic/);
+  });
+
+  it('refuses a nonsense offset', async () => {
+    const trip = await makeTrip(mineId, await officeToday());
+    for (const minutesFromNow of [-5, 1000, 'soon']) {
+      const { status } = await eta(mineToken, trip, { minutesFromNow });
+      assert.equal(status, 400, `${minutesFromNow} should be refused`);
+    }
+  });
+
+  it("refuses another driver's trip", async () => {
+    const trip = await makeTrip(otherId, await officeToday());
+    assert.equal((await eta(mineToken, trip, { minutesFromNow: 5 })).status, 404);
+  });
+});
+
+describe('every answer is the envelope', () => {
+  it('answers an unknown /api path with JSON, not an HTML error page', async () => {
+    // A phone that always parses the body as JSON throws on Next's HTML 404,
+    // and the driver sees a crash instead of a message.
+    const res = await fetch(`${BASE}/api/nothing/here`);
+    assert.equal(res.status, 404);
+    assert.match(res.headers.get('content-type') ?? '', /application\/json/);
+    assert.equal((await res.json() as Json).reason, 'not-found');
+  });
+
+  it('answers the wrong method with JSON, not an empty 405', async () => {
+    for (const [path, method] of [['/api/driver/sign-in', 'GET'], ['/api/driver/day', 'POST']] as const) {
+      const res = await fetch(`${BASE}${path}`, { method });
+      assert.equal(res.status, 405, `${method} ${path}`);
+      assert.match(res.headers.get('content-type') ?? '', /application\/json/);
+      assert.equal((await res.json() as Json).ok, false);
+    }
+  });
+});
+
+describe('the day version', () => {
+  it('stays put while nothing changes, and moves when something does', async () => {
+    const today = await officeToday();
+    const trip = await makeTrip(mineId, today);
+
+    const first = await call('/api/driver/day?which=today', mineToken);
+    const unchanged = await call('/api/driver/day?which=today', mineToken);
+    assert.ok(first.body.data.version, 'a version is sent');
+    assert.equal(unchanged.body.data.version, first.body.data.version, 'nothing moved');
+
+    await tap(mineToken, trip, { progress: 'IN ROUTE', idempotencyKey: randomUUID() });
+    const afterTap = await call('/api/driver/day?which=today', mineToken);
+    assert.notEqual(afterTap.body.data.version, first.body.data.version, 'a tap moves it');
+
+    await makeTrip(mineId, today, '15:00');
+    const afterAdd = await call('/api/driver/day?which=today', mineToken);
+    assert.notEqual(afterAdd.body.data.version, afterTap.body.data.version, 'a new trip moves it');
+  });
+});

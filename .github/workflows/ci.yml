@@ -24,6 +24,10 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agnext
+      # Not a secret here: no real provider is wired, and the job endpoint
+      # refuses to run at all when this is unset, so CI needs a value to
+      # exercise the route.
+      CRON_SECRET: ci-only-not-a-real-secret
 
     steps:
       - uses: actions/checkout@v4
