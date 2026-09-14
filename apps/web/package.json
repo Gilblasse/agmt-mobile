@@ -6,16 +6,23 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:pull": "drizzle-kit pull && node lib/db/apply-citext.mjs",
+    "test": "tsx --test __tests__/*.test.ts"
   },
   "dependencies": {
     "@ag/rules": "workspace:*",
+    "drizzle-orm": "^0.45.2",
     "next": "^16.1.6",
+    "postgres": "^3.4.9",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/react": "^19.2.10",
-    "@types/react-dom": "^19.2.3"
+    "@types/react-dom": "^19.2.3",
+    "drizzle-kit": "^0.31.10",
+    "tsx": "^4.23.13"
   }
 }

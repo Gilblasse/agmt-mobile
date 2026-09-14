@@ -50,6 +50,33 @@ out says so, and never quietly becomes a smaller number.
 `GET /` renders server-side from the same package: office-clock date, the
 priced breakdown, and a total of $86.00.
 
+## Driver sign-in (this iteration)
+
+17 integration tests against a real PostgreSQL and a running production
+server — **17 pass, 0 fail**. Codes are read back out of the `notifications`
+outbox, exactly as a delivery worker would; they never appear in a response.
+
+Requesting a code: queued to the outbox and absent from the reply; stored only
+as a SHA-256 digest; an unknown name gets the same answer as a known one; a
+second request inside the 60s cooldown queues nothing; a request naming nobody
+is refused.
+
+Verifying: returns a token and the driver; the token is stored only as a
+digest; a wrong code is refused without saying how many guesses remain; five
+wrong attempts burn the code so the *correct* one stops working; a code is
+single-use; one driver's code presented by another is refused; an expired code
+is refused.
+
+The roster gate: a signed-in driver passes; **marking a driver inactive cuts an
+existing session off on the very next request, with no separate revoke step**;
+missing, malformed and invented tokens are refused; revoked and expired
+sessions are refused; a ninth sign-in revokes the oldest, holding at eight
+trusted phones.
+
+Demonstrated end to end by hand as well: request → outbox message → verify →
+authorised `/api/driver/me` → driver marked inactive → same token refused with
+"This account is no longer active."
+
 ## CI
 
 Every `bun run` step in `.github/workflows/ci.yml` was run locally with the same

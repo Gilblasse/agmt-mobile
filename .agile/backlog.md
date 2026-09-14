@@ -9,14 +9,21 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
   `apps/web` and `apps/mobile` via an exports map over compiled output; Bun
   workspaces; CI running the parity harness. Verified: see `verification.md`.
 
+- **Driver sign-in** (Phase 2, first slice) — schema introspected with
+  `drizzle-kit pull`; `POST /api/driver/sign-in`, `POST /api/driver/verify`
+  and `GET /api/driver/me` behind the `Result` envelope with Zod at the
+  boundary; codes through the `notifications` outbox; the roster re-checked on
+  every request. 17 integration tests against real PostgreSQL, in CI.
+
 ## Next
 
-- **API skeleton** (Phase 2) — introspect `db/migrations/0001_init.sql` with
-  `drizzle-kit pull` rather than rewriting it; implement `src/api/contract.ts`
-  endpoint by endpoint behind the `Result<T>` envelope, with Zod at the
-  boundary. Auth and `driver_sessions` first.
+- **The rest of the API** (Phase 2) — remaining `contract.ts` endpoints behind
+  the same envelope. Next most useful: `getDriverDay`, then `setDriverProgress`
+  with its idempotency key, since those unblock the driver app.
   *Acceptance:* every endpoint returns the contract's envelope; one integration
-  test per `FailureReason`; `db/smoke.sql` still passes.
+  test per `FailureReason` reachable on that endpoint; `db/smoke.sql` still passes.
+  *Carry in:* update `contract.ts` so `driverVerify` matches what was built
+  (see `decisions.md`).
 
 - **Importer** (Phase 3) — *Acceptance:* runs twice with the same result, and
   every refused row is explainable. Watch the `23:58` sentinel and the Google
@@ -38,5 +45,11 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 
 - Both app entry screens duplicate the same sample `quote(...)` call. Throwaway
   scaffolding; assess when the real screens replace them.
-- `apps/web` has no linter yet. Add one when the first real endpoint lands, so
-  the config is shaped by real code rather than guessed at.
+- `apps/web` now has real endpoints and still no linter. Worth adding on the
+  next slice, when there is enough code for the config to be shaped by it.
+- Sign-in and verify both resolve a driver from name/email/phone with nearly
+  the same query. Observation: assess when the next endpoint needs the same
+  lookup.
+- Nothing drains the `notifications` outbox yet, so a queued sign-in code is
+  never actually delivered. That worker is what makes sign-in usable by a real
+  driver, and it needs the SMS provider decision from `docs/06`.

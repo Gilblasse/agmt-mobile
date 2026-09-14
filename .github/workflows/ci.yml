@@ -8,6 +8,23 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+
+    # The driver-auth tests run against a real PostgreSQL rather than a mock.
+    # The schema's constraints are part of what they are checking.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agnext
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agnext
+
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -37,8 +54,20 @@ jobs:
       - name: Typecheck mobile
         run: bun run --filter '@ag/mobile' typecheck
 
+      - name: Apply the schema
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/0001_init.sql
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/smoke.sql
+
       - name: Build web
         run: bun run --filter '@ag/web' build
+
+      # Driver sign-in end to end against the real database and a real server.
+      - name: Test the API
+        run: |
+          bun run --filter '@ag/web' start &
+          for i in $(seq 1 60); do curl -sf -o /dev/null http://localhost:3000/ && break; sleep 1; done
+          BASE_URL=http://localhost:3000 bun run --filter '@ag/web' test
 
       # Proves the shared rules still bundle into a phone build.
       - name: Export mobile bundles
