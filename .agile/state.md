@@ -13,13 +13,13 @@ mispricing a trip.
 **Iteration goal (autonomous):** make sign-in usable end to end — the outbox
 worker — then the Running Late notice and the recorded contract/envelope debt.
 
-**Status:** outbox worker, Running Late, contract alignment and envelope
-coverage all implemented and locally verified (96 tests). Independent review
-running at the time of writing; its findings and their dispositions are in
-`review-findings.md`.
+**Status:** outbox worker, Running Late, contract binding and envelope
+coverage implemented, independently reviewed, and repaired — four blockers and
+eight major findings, all fixed and re-verified against the reviewer's own
+attacks (`review-findings.md`). 103 tests.
 
-**Next action:** plug in an SMS provider — the only thing between a driver and
-signing in — and schedule the drain.
+**Next action:** plug in an SMS provider and schedule the drain. Until then no
+message is delivered and no driver can sign in.
 
 **Resolved:** the owner confirmed the repo is public as-is, knowing it carries
 the live Apps Script deployment URL and spreadsheet IDs. Rotating that

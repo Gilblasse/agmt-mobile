@@ -52,3 +52,53 @@ The records themselves are earning their place — `decisions.md` stopped the
 `driverVerify` deviation being re-argued twice, and `review-findings.md` is
 what makes "all fixed" checkable rather than a claim. Depth stays Standard
 with a mandatory independent review while this remains security-sensitive.
+
+## After Phase 2, slice 3 (the outbox and the late notice)
+
+**The previous improvement was written down and not applied, and it cost four
+blockers.**
+
+Last round's first action was: *"Write the concurrent case first, for anything
+with a nonce, a counter or a guard."* This round shipped two pieces of state
+with exactly that shape. Both got a concurrency test. Both tests were
+constructed so they could not fail for the bug that was there:
+
+- the outbox test used a sender returning in microseconds, so no claim could
+  go stale while a send was in flight — the one regime where the lease matters;
+- the ETA dedupe test `await`ed its two calls one after the other, so it passed
+  against an implementation with no dedupe transaction at all.
+
+So the rule was followed to the letter and missed the point. Writing *a*
+concurrent test is not the control; writing one that fails against the current
+code is.
+
+### 1. A new test for a race must be seen to fail first
+
+Before a race fix is committed, run the new test against the unfixed code and
+record the failure in the commit message. If it passes on both, it is not
+testing the race. This is the only one of these that would have caught all four
+blockers, because each had a test that passed on both sides.
+
+### 2. A fake must be as slow and as hostile as the real thing
+
+Every timing guarantee here was asserted against an instant, always-succeeding
+stub. A lease, a timeout and a back-off are all invisible to that. Fakes now
+come in three shapes by default — slow, failing, and hanging — and the slow one
+is the default for anything with a deadline.
+
+### 3. A recorded decision is a checklist for the next endpoint, not a diary
+
+`decisions.md` said *"A tap is decided under a lock on the trip row"*, naming
+the exact trigger — an offline queue draining two taps back to back. The next
+endpoint written read a trip, decided, and wrote, with no lock, and was hit by
+that precise scenario. The file was being appended to and not read.
+
+Before adding an endpoint that reads a row and then writes it, re-read
+`decisions.md` and say in the commit message which entries apply. Cheap, and it
+converts the record from history into a constraint.
+
+## Not changing
+
+Re-running the reviewer's own attack rather than trusting the suite. It is the
+only reason these fixes are known to work: the tests passed before the fixes
+too.
