@@ -1,6 +1,6 @@
 import { and, eq, gt, isNull, sql } from 'drizzle-orm';
 import { db } from '@/lib/db';
-import { driverSessions, drivers } from '@/lib/db/schema';
+import { driverSessions, drivers, trips } from '@/lib/db/schema';
 import { hashToken } from './tokens';
 
 /** How long a trusted phone stays trusted before it needs a fresh code. */
@@ -89,4 +89,48 @@ export async function revokeSessionsBeyondLimit(driverId: string): Promise<numbe
     RETURNING id
   `);
   return result.length;
+}
+
+export type TripAccess =
+  | { ok: true; driver: Driver; trip: typeof trips.$inferSelect }
+  | { ok: false; reason: 'no-token' | 'not-signed-in' | 'off-roster' | 'not-found' | 'not-yours' };
+
+/**
+ * Resolves the caller AND the trip they are acting on, and refuses unless the
+ * trip is theirs.
+ *
+ * Knowing who someone is says nothing about what they may touch. The old
+ * system's gate matched a driver's name against the trip's free-text driver
+ * field, which let `Lee` match `Ashleen` — one driver could see and complete
+ * another's trips (docs/02 §1.5). Names are gone here; the trip carries a
+ * driver id, and it has to be this driver's.
+ *
+ * An unassigned trip is refused too. It belongs to the office, not to whoever
+ * asks first — the old code let any signed-in driver work a trip with an empty
+ * driver cell, and that is expressly called out as wrong (docs/02 §1.7).
+ */
+export async function authorizeDriverForTrip(request: Request, tripId: string): Promise<TripAccess> {
+  const auth = await authenticateDriver(request);
+  if (!auth.ok) return auth;
+
+  const [trip] = await db.select().from(trips).where(eq(trips.id, tripId)).limit(1);
+  // "Not yours" and "does not exist" are the same answer on purpose: otherwise
+  // a driver could learn which trip ids are real by trying them.
+  if (!trip || trip.driverId !== auth.driver.id) {
+    return { ok: false, reason: trip ? 'not-yours' : 'not-found' };
+  }
+  return { ok: true, driver: auth.driver, trip };
+}
+
+/** What to tell a driver whose request was refused, in words they can act on. */
+export function refusalMessage(reason: Exclude<TripAccess, { ok: true }>['reason']): string {
+  switch (reason) {
+    case 'off-roster':
+      return 'This account is no longer active. Ask the office.';
+    case 'not-found':
+    case 'not-yours':
+      return 'That trip is not on your schedule any more. Pull down to refresh.';
+    default:
+      return 'Please sign in again.';
+  }
 }

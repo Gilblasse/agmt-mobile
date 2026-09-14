@@ -115,6 +115,47 @@ the 26 sign-in tests, because they all shared one caller bucket. That is not
 only a test artefact — a depot of drivers on one WiFi shares a public IP too.
 Limits were raised to 30 and the reasoning written where they are set.
 
+## The driver's day and the tap flow
+
+20 tests, all passing, and the 31 earlier tests re-run as regression — 51 in
+total against a real PostgreSQL and a real server.
+
+**The day:** only this driver's trips, for the office's date — another
+driver's and an unassigned trip are both absent. Every payload carries
+`serverNow`, `serverClock` and the timezone so the phone can correct its own
+clock. A trip with no time sorts last, not at midnight. Tomorrow is readable
+and marked `readOnly`.
+
+**The tap**, which is what docs/08 says not to ship without:
+
+- Five steps walk in order, each writing its own timestamp.
+- The same nonce re-sent four times applies once: one `trip_events` row.
+- Eight simultaneous re-sends of one nonce apply once, and the seven losers
+  answer success — the driver did tap — rather than an error.
+- A stale tap arriving after the trip completed is ignored and reports what is
+  actually true; it never drags the trip backwards.
+- What the phone believed is recorded in the event payload; the stamp written
+  is the server's. A device clock set to 2020 changes nothing.
+
+**Whose trip it is** — the gate the old system got wrong, where a name match
+let one driver complete another's:
+
+- Another driver's trip is refused, and is left untouched.
+- An unassigned trip is refused: it belongs to the office, not whoever asks.
+- A trip that does not exist and a trip that is not yours answer identically,
+  so ids cannot be probed.
+- Marking a driver inactive stops them mid-trip, on the next tap.
+- Tomorrow's trips refuse taps, so read-only is enforced by the server rather
+  than trusted to the app.
+
+**Undo** steps back exactly one place and clears the stamp as well as the
+step — leaving the stamp behind let the step re-assert itself on the next
+read. A re-sent undo changes nothing further.
+
+Demonstrated by hand end to end: sign in, open the day, tap all five steps,
+re-send an already-delivered tap five times (5 events recorded, not 10), then
+drain a stale tap which is ignored with the trip left at COMPLETE.
+
 ## CI
 
 Every `bun run` step in `.github/workflows/ci.yml` was run locally with the same

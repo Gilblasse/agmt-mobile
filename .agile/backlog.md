@@ -23,6 +23,11 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
   boundary; codes through the `notifications` outbox; the roster re-checked on
   every request. 17 integration tests against real PostgreSQL, in CI.
 
+- **The driver's day and the tap flow** — `GET /api/driver/day`,
+  `POST /api/driver/trips/:id/progress`, `POST .../undo`. Ownership gate,
+  idempotent taps, monotonic guard, server-clock stamps, tomorrow read-only.
+  20 integration tests.
+
 ## Next
 
 - **The rest of the API** (Phase 2) — remaining `contract.ts` endpoints behind
