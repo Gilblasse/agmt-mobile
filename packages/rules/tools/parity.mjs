@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dist = path.join(root, 'dist', 'src', 'rules');
@@ -55,7 +55,7 @@ const ctx = {
 vm.createContext(ctx);
 vm.runInContext(tm.slice(from, to), ctx);
 
-const pricing = await import(path.join(dist, 'pricing.js'));
+const pricing = await import(pathToFileURL(path.join(dist, 'pricing.js')).href);
 
 let failures = 0;
 const fail = (msg) => { failures++; console.error('  ✗ ' + msg); };
@@ -154,7 +154,7 @@ for (const name of ['driverNameParts_', 'driverShortFormOf_', 'driverNorm_', 'dr
   const end = da.indexOf('\n}', i);   // the closing brace at column 0
   vm.runInContext(da.slice(i, end + 2), dctx);
 }
-const drivers = await import(path.join(dist, 'drivers.js'));
+const drivers = await import(pathToFileURL(path.join(dist, 'drivers.js')).href);
 
 if (typeof dctx.driverMatches_ !== 'function') {
   console.log('  – driverMatches_ not found in DriverApp.gs; skipped');

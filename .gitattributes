@@ -1,0 +1,13 @@
+# Line endings are LF in the repository, on every platform.
+#
+# The rebuild is worked on from Windows and Linux. Without this, a Windows
+# checkout with core.autocrlf rewrites every file it touches to CRLF and the
+# next commit is a wall of whole-file diffs — and the parity harness reads the
+# legacy Apps Script byte for byte, so it must see the same bytes everywhere.
+* text=auto eol=lf
+
+# Never touched by line-ending conversion.
+*.png binary
+*.jpg binary
+*.ico binary
+*.lock binary
