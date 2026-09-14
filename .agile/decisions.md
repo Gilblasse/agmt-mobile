@@ -164,3 +164,34 @@ the leftmost entry meant one host rotating a made-up value was never refused,
 and that wearing someone else's address spent *their* budget. Entries are
 validated as addresses and counted `TRUSTED_PROXY_HOPS` from the right, and a
 caller who cannot be placed shares one bucket rather than getting a free pass.
+
+## Delivery is an interface with a do-nothing default
+
+Which SMS provider to use is a business decision with a bill attached, and the
+worker should not wait on it. So the outbox, its lease, its back-off and its
+giving-up are all built and tested, and the last inch is a `Sender` someone
+plugs a provider into.
+
+The default deliberately **fails** rather than pretending to succeed: a message
+stays queued, and `describe()` reports "no delivery provider configured". A
+development sender that quietly returned success would make the system look
+like it works, which is the failure mode that matters here.
+
+## Claiming a message leases it, rather than locking it
+
+`FOR UPDATE SKIP LOCKED` protects a row only while the claiming transaction is
+open. Incrementing `attempts` left the row `pending` and still due, so once the
+first worker committed the next one sent it again — **ten messages went out
+twenty-two times**. Claiming now pushes `send_after` forward by a lease, which
+takes the row out of the due set and doubles as crash recovery: a worker that
+dies mid-send does not strand its messages.
+
+## Test files run one at a time
+
+`node --test` runs files in parallel by default, and these suites share one
+database and one server. In parallel the outbox drain — global by design —
+claimed the sign-in codes another suite was waiting on. `--test-concurrency=1`.
+
+`--test-force-exit` is also needed: a top-level `after` cannot close the
+connection pool that is keeping the event loop alive, because it only runs when
+the loop ends.

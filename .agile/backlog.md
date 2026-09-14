@@ -5,6 +5,14 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 
 ## Done
 
+- **Notification outbox worker** — claims due messages under a lease, retries
+  with back-off, gives up after five attempts keeping the row and its last
+  error, and drains behind a secret-gated job endpoint. Delivery itself is a
+  `Sender` interface whose default sends nothing and says so.
+  *Residual:* no provider is plugged in, so **no message is actually delivered
+  yet**. That is the SMS decision in `docs/06`, and it is now the only thing
+  between a driver and signing in.
+
 - **Rate limiting on the unauthenticated endpoints** — fixed-window counters in
   the database (migration 0003), 30 per ten minutes per caller on each of
   `sign-in` and `verify`, answering `busy` with `Retry-After`. Verified: an
@@ -70,6 +78,6 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 - Sign-in and verify both resolve a driver from name/email/phone with nearly
   the same query. Observation: assess when the next endpoint needs the same
   lookup.
-- Nothing drains the `notifications` outbox yet, so a queued sign-in code is
-  never actually delivered. That worker is what makes sign-in usable by a real
-  driver, and it needs the SMS provider decision from `docs/06`.
+- The office cannot see the outbox: `getOutbox` and `retryNotification` from
+  the contract need office authentication, which does not exist yet. Until
+  then an abandoned message is visible only in the database.
