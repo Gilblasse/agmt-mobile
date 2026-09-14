@@ -293,6 +293,44 @@ A2P 10DLC registration, trial restrictions, `TWILIO_FROM` capability,
 geographic permissions — cannot be checked from here at all, which is why the
 README now says what the startup line can and cannot tell you.
 
+## The second Twilio repair round
+
+All eight migrations apply clean to an empty database and `db/smoke.sql` still
+passes. `bun run typecheck` clean. **174 tests, 0 failures**, against
+PostgreSQL 16 and a running Next server on the same database.
+
+Every blocker fix has a test that was run against the *unfixed* code and
+watched to fail:
+
+| Fix | Reverted to | The test that then failed |
+|---|---|---|
+| A provider problem backs off on a count of its own | a flat 60-second retry | `does not let unsendable messages starve everything behind them` — the sign-in code expired unsent; and `backs a stuck provider off instead of retrying it every minute` |
+| An ambiguous timeout is reconciled, not retried | — | the four cases under `when Twilio does not answer`, which did not exist against a path that had only one outcome |
+| An outcome counts only if its `UPDATE` matched | — | `does not record a message as accepted when the claim moved under it` |
+
+The first version of the starvation test **passed** against the broken
+back-off, because the `ELSE` arm still eventually backed the row off. That is
+recorded in `improvements.md`: it is precisely what the round-4 rule exists to
+catch, and without running it against the revert a test asserting nothing
+would have gone in as evidence.
+
+Re-run live against the stand-in after the repairs:
+
+```
+sign-in  → drain: claimed 1, accepted 1, unresolved 0, unconfirmed 0
+stand-in → To=+18455557799 Body=380452 is your Amazing Grace sign-in code…
+callback → 204, state=sent, provider_ref=SM_standin_3, delivered_at set
+email-only driver → channel=email state=abandoned
+           "No provider is configured for email."
+```
+
+That last line is the B1 fix: the same row used to sit `pending` for ever at
+the head of the queue.
+
+`OUTBOX_LEASE_SECONDS` validation confirmed directly: `"2m"` is refused at
+startup with a message naming the setting, rather than becoming `NaN` and
+defeating the assertion that a send cannot outlast a claim.
+
 ## Not verified
 
 - `expo-sqlite` cold-start with a corrupt row — no offline queue exists yet.

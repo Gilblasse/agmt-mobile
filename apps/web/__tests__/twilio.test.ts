@@ -113,6 +113,15 @@ describe('where the messages are sent', () => {
     assert.equal(checkBaseUrl('https://api.au1.twilio.com').hostname, 'api.au1.twilio.com');
   });
 
+  it('refuses a base address with a path, rather than dropping it', () => {
+    // The API path is built against this address, so a path here is silently
+    // discarded — an operator fronting Twilio with a gateway at /twilio-proxy
+    // would send the account's auth token to the gateway's root instead.
+    assert.throws(() => checkBaseUrl('https://gw.example.com/twilio-proxy'), /no path/);
+    assert.throws(() => checkBaseUrl('https://gw.example.com/?x=1'), /no path/);
+    assert.equal(checkBaseUrl('https://api.twilio.com/').pathname, '/');
+  });
+
   it('refuses a region that is not a country', () => {
     assert.throws(() => twilioSender({ ...config, defaultRegion: '44' }), /two-letter country/);
     assert.throws(() => twilioSender({ ...config, defaultRegion: 'ZZ' }), /two-letter country/);
@@ -244,6 +253,50 @@ describe('deciding whether to try again', () => {
     }
   });
 
+  it('does not give up on a number that merely could not be reached', async () => {
+    // 21214 was described in this file as "not a valid mobile number". Twilio
+    // means "cannot be reached", which is often a moment, not a fact — and
+    // abandoning threw away a message a later attempt would have delivered.
+    const { fetchImpl } = fakeTwilio(refused(21214, 'To phone number cannot be reached'));
+    assert.notEqual(refusal(await twilio(fetchImpl).send(text)).permanent, true);
+  });
+
+  it('says why in words the office can act on, not just a number', async () => {
+    // last_error is where somebody looks when a driver says no code arrived.
+    const { fetchImpl } = fakeTwilio(refused(21610, 'unsubscribed'));
+    const { error } = refusal(await twilio(fetchImpl).send(text));
+    assert.match(error, /replied STOP/);
+    assert.match(error, /cannot sign in/, 'and what it means for the driver');
+  });
+
+  it('does not spend the message on something the account did', async () => {
+    // Moving these out of the permanent set was not enough: they still burned
+    // the retry budget, so a wrong token over one lunch abandoned every queued
+    // sign-in code in eighty-one minutes.
+    const cases: [number, number][] = [
+      [20003, 401], [21606, 400], [21408, 400], [20429, 429], [0, 503],
+    ];
+    for (const [code, status] of cases) {
+      const answer = code
+        ? refused(code, 'not this message', status)
+        : new Response('{"message":"service unavailable"}', { status });
+      const { fetchImpl } = fakeTwilio(answer);
+      const result = refusal(await twilio(fetchImpl).send(text));
+      assert.equal(result.cause, 'provider', `${code || status} is the account's problem, not the message's`);
+    }
+  });
+
+  it('does not write Twilio’s own quoting of the number into the record', async () => {
+    // Masking the one sentence this file composes was not enough — Twilio
+    // quotes the number back inside its own message.
+    const { fetchImpl } = fakeTwilio(
+      refused(30007, "The 'To' number +18455550101 was blocked by the carrier."),
+    );
+    const { error } = refusal(await twilio(fetchImpl).send(text));
+    assert.doesNotMatch(error, /18455550101/);
+    assert.match(error, /\*\*\*/);
+  });
+
   it('keeps the message when the problem is a setting somebody can switch on', async () => {
     // These read like the recipient's fault and are not: both are account
     // settings in the Twilio console. Listed as permanent, one switch left off
@@ -253,6 +306,7 @@ describe('deciding whether to try again', () => {
       [21408, 'no permission to send to that region'],
       [21612, 'this sender cannot reach that number'],
       [21606, 'the From number cannot send texts'],
+      [21214, 'To phone number cannot be reached'],
     ] as const) {
       const { fetchImpl } = fakeTwilio(refused(code, why));
       assert.notEqual(refusal(await twilio(fetchImpl).send(text)).permanent, true, `${code} must stay retryable`);
@@ -280,15 +334,19 @@ describe('deciding whether to try again', () => {
     assert.equal(refusal(await twilio(fetchImpl).send(text)).permanent, true);
   });
 
-  it('keeps the message when Twilio cannot be reached at all', async () => {
-    const fetchImpl = (async () => {
-      throw new Error('network unreachable');
-    }) as unknown as typeof fetch;
-    const result = refusal(await twilio(fetchImpl).send(text));
-    assert.notEqual(result.permanent, true, 'an outage is not the message’s fault');
-    assert.match(result.error, /Could not reach Twilio/);
+  it('keeps the message when the request never left this machine', async () => {
+    // Refused, or a name that does not resolve: nothing arrived at Twilio, so
+    // trying again cannot duplicate anything.
+    for (const code of ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']) {
+      const fetchImpl = (async () => {
+        throw Object.assign(new TypeError('fetch failed'), { cause: { code } });
+      }) as unknown as typeof fetch;
+      const result = refusal(await twilio(fetchImpl).send(text));
+      assert.notEqual(result.permanent, true, 'an outage is not the message’s fault');
+      assert.notEqual(result.cause, 'unresolved', `${code} is unambiguous`);
+      assert.match(result.error, /Could not reach Twilio/);
+    }
   });
-
   it('refuses a recipient it cannot dial, without calling Twilio', async () => {
     const { calls, fetchImpl } = fakeTwilio(queued());
     const result = refusal(await twilio(fetchImpl).send({ ...text, recipient: 'ask the office' }));
@@ -302,7 +360,10 @@ describe('deciding whether to try again', () => {
     const { fetchImpl } = fakeTwilio(queued());
     const { error } = refusal(await twilio(fetchImpl).send({ ...text, recipient: '845555010' }));
     assert.doesNotMatch(error, /845555010/, 'the number itself is not in the record');
-    assert.match(error, /0101|\*\*\*/, 'but enough to tell one recipient from another');
+    // Enough to tell one recipient from another, and no more. The previous
+    // assertion here matched `***`, which masked() always emits, so it could
+    // not fail.
+    assert.match(error, /\*\*\*5010\b/);
   });
 
   it('does not try to send an email through a text provider', async () => {
@@ -311,6 +372,68 @@ describe('deciding whether to try again', () => {
     assert.equal(result.accepted, false);
     assert.equal(calls.length, 0);
   });
+});
+
+describe('when Twilio does not answer', () => {
+  /**
+   * The shipped ten-second timeout against a provider that answers in eleven.
+   * `AbortSignal.timeout` fires on this side; the POST has already arrived and
+   * Twilio has already created the message. Retrying is how a driver is texted
+   * the same sign-in code twice, which is the thing this whole queue exists to
+   * prevent — so the adapter asks Twilio what it actually has.
+   */
+  function timesOutThenLists(messages: unknown[] | 'unreachable') {
+    const seen: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push(`${init?.method ?? 'GET'} ${String(url)}`);
+      if ((init?.method ?? 'GET') === 'POST') {
+        throw Object.assign(new Error('The operation timed out.'), { name: 'TimeoutError' });
+      }
+      if (messages === 'unreachable') throw new Error('and the lookup failed too');
+      return new Response(JSON.stringify({ messages }), { status: 200 });
+    }) as unknown as typeof fetch;
+    return {
+      seen,
+      twilio: twilioSender({
+        accountSid: 'AC', authToken: 't', from: '+15550001111', fetch: fetchImpl,
+      }),
+    };
+  }
+
+  it('does not send again when Twilio turns out to have the message', async () => {
+    const { seen, twilio } = timesOutThenLists([
+      { sid: 'SM_already', body: text.body, date_created: new Date().toISOString() },
+    ]);
+    const result = await twilio.send(text);
+    assert.deepEqual(result, { accepted: true, reference: 'SM_already' });
+    assert.match(seen[1] ?? '', /^GET .*Messages\.json\?To=%2B18455550101/);
+  });
+
+  it('does send again when Twilio has no record of it', async () => {
+    const { twilio } = timesOutThenLists([]);
+    const result = refusal(await twilio.send(text));
+    assert.notEqual(result.cause, 'unresolved');
+    assert.match(result.error, /no record/);
+  });
+
+  it('is not fooled by an older message with the same words', async () => {
+    // "Your trip was cancelled" is the same text every time.
+    const { twilio } = timesOutThenLists([
+      { sid: 'SM_old', body: text.body, date_created: new Date(Date.now() - 3 * 3600_000).toISOString() },
+    ]);
+    const result = refusal(await twilio.send(text));
+    assert.match(result.error, /no record/);
+  });
+
+  it('refuses to guess when it cannot ask either', async () => {
+    // Neither sent nor not sent. Retrying texts the driver twice; giving up
+    // texts them not at all. The row stops and a person decides.
+    const { twilio } = timesOutThenLists('unreachable');
+    const result = refusal(await twilio.send(text));
+    assert.equal(result.cause, 'unresolved');
+    assert.match(result.error, /may or may not have been sent/);
+  });
+
 });
 
 describe('choosing a provider from the environment', () => {

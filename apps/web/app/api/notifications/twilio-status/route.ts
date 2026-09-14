@@ -45,15 +45,19 @@ export async function POST(request: Request): Promise<Response> {
   const status = fields.get('MessageStatus') ?? fields.get('SmsStatus');
   if (!reference || !status) return new Response(null, { status: 400 });
 
-  const outcome = OUTCOME[status as keyof typeof OUTCOME];
+  let outcome = OUTCOME[status as keyof typeof OUTCOME];
   // queued, sending, sent, accepted, scheduled: on their way. Nothing settled
   // yet, and nothing to record.
   if (!outcome) return new Response(null, { status: 204 });
 
   const errorCode = fields.get('ErrorCode');
+  const unsendable = isPermanentCode(errorCode);
   const detail = errorCode
-    ? `Twilio reported ${status} (${errorCode})${isPermanentCode(errorCode) ? ' — this number cannot be texted' : ''}.`
+    ? `Twilio reported ${status} (${errorCode})${unsendable ? ' — this number cannot be texted' : ''}.`
     : `Twilio reported ${status}.`;
+  // A number that can never be texted is `abandoned`, the same as when the
+  // Messages API says so up front. Two states for one fact would have meant
+  // the office reading the queue by which route the bad news arrived.
 
   // `undelivered` and `failed` stay put rather than going back in the queue.
   // Twilio has already tried; re-sending the same message risks a second copy
@@ -65,6 +69,8 @@ export async function POST(request: Request): Promise<Response> {
   // than once and out of order: Twilio retries callbacks, and a `sent`
   // callback can arrive after `delivered`. Only a row still waiting on an
   // outcome can be moved by one.
+  if (outcome === 'failed' && unsendable) outcome = 'abandoned';
+
   await db.execute(sql`
     UPDATE notifications
     SET state = ${outcome}::outbox_state,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, describe, it } from 'node:test';
-import { drainOutbox } from '@/lib/notifications/outbox';
-import { unconfiguredSender, useSender, type Message, type Sent } from '@/lib/notifications/sender';
+import { drainOutbox, readLeaseSeconds } from '@/lib/notifications/outbox';
+import { resetSender, unconfiguredSender, useSender, type Message, type Sent } from '@/lib/notifications/sender';
 import { twilioSender } from '@/lib/notifications/twilio';
 import { sql } from './_db';
 
@@ -28,6 +28,8 @@ function fakeSender(answer: (m: Message) => Sent | Promise<Sent>) {
 }
 
 const delivers = () => fakeSender(() => ({ accepted: true }));
+const providerDown = (error = 'no provider') =>
+  fakeSender(() => ({ accepted: false, error, cause: 'provider' as const }));
 const failsWith = (error: string, permanent = false) =>
   fakeSender(() => ({ accepted: false, error, permanent }));
 
@@ -184,7 +186,10 @@ describe('draining the outbox', () => {
 
     assert.equal(finished, 1, 'the message behind the hang still went');
     assert.equal(result.accepted, 1);
-    assert.equal(result.failed, 1, 'the hanging one is retried later, not lost');
+    // Not "retried later": our deadline firing says nothing about whether the
+    // message went. Sending it again would be the duplicate; giving up would
+    // be the silence. It stops for a person.
+    assert.equal(result.unresolved, 1);
   });
 
   it('returns a message whose worker never came back', async () => {
@@ -211,7 +216,7 @@ describe('draining the outbox', () => {
 
     const result = await drainOutbox();
     assert.equal(result.accepted, 2, 'the other two still went');
-    assert.equal(result.failed, 1);
+    assert.equal(result.failed, 1, 'a sender that throws is a fault in our code, so retryable');
     assert.equal((await stateOf(ok1)).state, 'accepted');
     assert.equal((await stateOf(ok2)).state, 'accepted');
   });
@@ -294,6 +299,86 @@ describe('with Twilio behind the outbox', () => {
 });
 
 describe('not spending the budget on things that are not the message’s fault', () => {
+  it('does not let unsendable messages starve everything behind them', async () => {
+    // The whole point of not charging an attempt is that such a row is never
+    // abandoned. Retried every sixty seconds, twenty of them are then the
+    // twenty oldest rows due on every drain, for ever — and a driver's
+    // sign-in code sits behind them until it expires. Reproduced: ten minutes
+    // of drains, zero texts, the code abandoned unsent.
+    for (let i = 0; i < 6; i++) {
+      const id = await queue(`unsendable ${i}`);
+      await sql`UPDATE notifications SET created_at = now() - interval '6 hours' WHERE id = ${id}`;
+    }
+    const code = await queue('123456 is your code');
+    // A real sign-in code, with the ten minutes it actually lives.
+    await sql`UPDATE notifications SET expires_at = now() + interval '10 minutes' WHERE id = ${code}`;
+    const seen = fakeSender((m) =>
+      m.body.startsWith('unsendable')
+        ? { accepted: false, error: 'nothing can send this', cause: 'provider' as const }
+        : { accepted: true },
+    );
+
+    // Ten minutes of drains, one a minute, with a batch smaller than the
+    // blockage. Time is moved by shifting every row equally, which is what a
+    // minute passing actually does to this table.
+    for (let minute = 0; minute < 10; minute++) {
+      await drainOutbox(6);
+      await sql`UPDATE notifications SET
+        send_after = send_after - interval '1 minute',
+        created_at = created_at - interval '1 minute',
+        expires_at = expires_at - interval '1 minute',
+        sent_at = sent_at - interval '1 minute'`;
+    }
+
+    assert.ok(
+      seen.some((m) => m.body === '123456 is your code'),
+      'the sign-in code got through rather than expiring behind them',
+    );
+    assert.equal((await stateOf(code)).state, 'accepted');
+  });
+
+  it('backs a stuck provider off instead of retrying it every minute', async () => {
+    const id = await queue('nobody to send me');
+    providerDown();
+    await drainOutbox();
+    const first = await stateOf(id);
+    await sql`UPDATE notifications SET send_after = now() WHERE id = ${id}`;
+    await drainOutbox();
+    const second = await stateOf(id);
+
+    const wait = (row: Record<string, unknown>) =>
+      new Date(String(row.send_after)).getTime() - Date.now();
+    assert.ok(wait(first) > 30_000, 'a minute out, not immediately');
+    assert.ok(wait(second) > wait(first) + 60_000, 'and further out each time');
+    assert.equal(second.attempts, 0, 'none of it charged to the message');
+  });
+
+  it('gives up on a channel nothing will ever send, rather than queueing it for ever', async () => {
+    // Email has no provider — an unmet [must], docs/07:182. Treating that as
+    // "wait for the office" was wrong: there is no email service being waited
+    // on, so the row waited for ever at the head of the queue.
+    const [row] = await sql`
+      INSERT INTO notifications (channel, recipient, body)
+      VALUES ('email', 'driver@example.com', 'a code') RETURNING id`;
+    const id = row!.id as string;
+    useSender(unconfiguredSender);
+    resetSender();
+    const configured = { ...process.env };
+    Object.assign(process.env, {
+      TWILIO_ACCOUNT_SID: 'AC', TWILIO_AUTH_TOKEN: 'tok', TWILIO_FROM: '+15550001111',
+    });
+    try {
+      await drainOutbox();
+    } finally {
+      Object.assign(process.env, configured);
+      resetSender();
+    }
+    const after = await stateOf(id);
+    assert.equal(after.state, 'abandoned');
+    assert.match(after.last_error, /No provider is configured for email/);
+    await sql`DELETE FROM notifications WHERE id = ${id}`;
+  });
+
   it('does not charge an attempt when there is no provider at all', async () => {
     // Every drain used to charge the message an attempt on claiming it,
     // whatever came back. With the credentials unset that is five drains —
@@ -421,5 +506,94 @@ describe('what Twilio says inside a 201', () => {
     const row = await stateOf(id);
     assert.equal(row.state, 'accepted');
     assert.equal(row.provider_ref, 'SMabc');
+  });
+});
+
+describe('when nobody knows whether it was sent', () => {
+  it('neither sends again nor gives up, and says a person has to look', async () => {
+    // The request reached the provider and the answer did not come back. Both
+    // guesses are wrong: retrying texts the driver the same code twice,
+    // abandoning texts them not at all. This is the case the README says the
+    // outbox exists for — "told twice, or not at all, with no record either
+    // way" — so the one thing it must leave behind is a record.
+    const id = await queue('nobody knows');
+    const seen = fakeSender(() => ({
+      accepted: false as const,
+      error: 'Twilio did not answer, and asking it what it has did not answer either.',
+      cause: 'unresolved' as const,
+    }));
+
+    const result = await drainOutbox();
+    assert.equal(result.unresolved, 1);
+    const row = await stateOf(id);
+    assert.equal(row.state, 'unresolved');
+    assert.match(row.last_error, /did not answer/);
+
+    // And a later drain does not quietly pick it up again.
+    await drainOutbox();
+    assert.equal(seen.length, 1, 'sent once, at most');
+    assert.equal((await stateOf(id)).state, 'unresolved');
+  });
+
+  it('does not record a message as accepted when the claim moved under it', async () => {
+    // A conditional UPDATE that matches nothing does not throw. Counting it a
+    // success reported "accepted: 1" for a row left pending — which the next
+    // drain then sent again.
+    const id = await queue('claim moves mid-send');
+    fakeSender(async () => {
+      // The sweeper returns the claim while this send is still in flight.
+      await sql`UPDATE notifications SET state = 'pending', claimed_by = NULL, claimed_at = NULL
+        WHERE id = ${id}`;
+      return { accepted: true };
+    });
+
+    const result = await drainOutbox();
+    assert.equal(result.accepted, 0, 'nothing was recorded, so nothing is claimed');
+    assert.equal(result.unresolved, 1, 'and it is counted where a person will see it');
+  });
+
+  it('counts messages the provider took and never reported on', async () => {
+    const id = await queue('taken, never heard of again');
+    delivers();
+    await drainOutbox();
+    await sql`UPDATE notifications SET sent_at = now() - interval '1 hour' WHERE id = ${id}`;
+    const result = await drainOutbox();
+    assert.ok(result.unconfirmed >= 1, 'a message stuck at accepted is not silent');
+  });
+});
+
+describe('the words the office reads', () => {
+  it('gives the expiry in the office’s time, in plain words', async () => {
+    // CLAUDE.md #3: never the server's own timezone. This sentence was coming
+    // out as "2026-09-14 21:08:51.903945+00" — the database session's time,
+    // which is nobody's, with microseconds in it.
+    const id = await queue('too late');
+    await sql`UPDATE notifications SET expires_at = now() - interval '1 minute' WHERE id = ${id}`;
+    const before = await sql`SHOW TimeZone`;
+    await drainOutbox();
+    const row = await stateOf(id);
+
+    assert.doesNotMatch(row.last_error, /\+00|\.\d{6}/, 'no UTC offset and no microseconds');
+    assert.match(row.last_error, /only good until \d{1,2}:\d{2} (am|pm) on \w+ \d{1,2} \w+\./);
+    assert.ok(before, 'the session timezone is irrelevant to the answer');
+  });
+});
+
+describe('the one setting the whole scheme rests on', () => {
+  it('refuses a lease that is not a number of seconds', () => {
+    // `Number('2m')` is NaN, and NaN fails every comparison — including the
+    // assertion that a send may not outlast a claim, which is the one thing
+    // standing between this and sending everything twice. It also reaches
+    // Postgres as `make_interval(secs => NaN)` and takes every drain down.
+    // And `.env.example` documents this as a quantity somebody may set.
+    for (const bad of ['2m', 'two minutes', 'NaN', '-30', '5', 'Infinity']) {
+      assert.throws(() => readLeaseSeconds(bad), /must be a number of seconds/, `"${bad}"`);
+    }
+  });
+
+  it('takes a plain number, and defaults when unset', () => {
+    assert.equal(readLeaseSeconds('120'), 120);
+    assert.equal(readLeaseSeconds(undefined), 120);
+    assert.equal(readLeaseSeconds(''), 120);
   });
 });

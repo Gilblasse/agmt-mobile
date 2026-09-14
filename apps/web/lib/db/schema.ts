@@ -270,6 +270,7 @@ export const notifications = pgTable("notifications", {
 	providerRef: text("provider_ref"),
 	deliveredAt: timestamp("delivered_at", { withTimezone: true, mode: 'string' }),
 	expiresAt: timestamp("expires_at", { withTimezone: true, mode: 'string' }),
+	configAttempts: integer("config_attempts").default(0).notNull(),
 }, (table) => [
 	uniqueIndex("notifications_dedupe_key").using("btree", table.dedupeKey.asc().nullsLast().op("text_ops")).where(sql`(dedupe_key IS NOT NULL)`),
 	index("notifications_due_idx").using("btree", table.sendAfter.asc().nullsLast().op("timestamptz_ops")).where(sql`(state = 'pending'::outbox_state)`),

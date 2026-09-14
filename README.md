@@ -104,10 +104,23 @@ facts it used to conflate:
 | `sent` | Twilio confirmed the handset received it. |
 | `failed` | Twilio reported it undelivered. `last_error` says why. |
 | `abandoned` | Given up on — the number cannot be texted, or the message was no longer worth sending. |
+| `unresolved` | **Somebody has to look.** The request reached Twilio and the answer did not come back, and asking Twilio what it has did not answer either. Sending it again might text the driver twice; giving up might text them not at all. Nothing retries it. |
 
 A message only ever gets past `accepted` if `TWILIO_STATUS_CALLBACK_URL` is
 set to this deployment's public URL, so Twilio has somewhere to report to.
 Reports are rejected unless they carry Twilio's signature for that exact URL.
+Without a callback, every message stops at `accepted` — the drain counts how
+many have been sitting there for over fifteen minutes and says so, because a
+number that keeps climbing means either no reports are arriving or the
+carrier is filtering the messages.
+
+The drain's log is where an outage shows up. Three lines mean act now:
+
+```
+[outbox] NOTHING IS BEING SENT: <reason>       nothing is leaving at all
+[outbox] N message(s) may or may not have been sent.
+[outbox] N message(s) the provider took but has never reported on.
+```
 
 Email has no provider yet, so a driver with no phone number on file cannot be
 sent a code. This is a gap, not a decision: `docs/07-feature-checklist.md:182`

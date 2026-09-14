@@ -35,6 +35,24 @@ export const POST = withResult(async (request: Request) => {
         `expired ${result.expired} (${result.provider})`,
     );
   }
+  // These three are not statistics. Each one means somebody has to do
+  // something, and a count buried in a line that also says "retrying 20" is
+  // how an outage goes unnoticed for a day.
+  if (result.providerProblem) {
+    console.error(`[outbox] NOTHING IS BEING SENT: ${result.providerProblem}`);
+  }
+  if (result.unresolved > 0) {
+    console.error(
+      `[outbox] ${result.unresolved} message(s) may or may not have been sent. ` +
+        `Look at the rows in state 'unresolved' before sending anything again.`,
+    );
+  }
+  if (result.unconfirmed > 0) {
+    console.warn(
+      `[outbox] ${result.unconfirmed} message(s) the provider took but has never reported on. ` +
+        `If this keeps climbing, either no delivery reports are arriving or messages are being filtered.`,
+    );
+  }
   return ok(result);
 });
 

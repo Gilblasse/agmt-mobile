@@ -129,11 +129,19 @@ export const POST = withResult(async (request: Request) => {
     // would try it, be told it is wrong, and have no way to know which of the
     // two texts is the live one. Under a provider outage there could be
     // several queued at once.
+    //
+    // `sending` is included, and this is why every row gets `expires_at`
+    // rather than only a new state: a worker that has already claimed the old
+    // code is holding it in memory, so changing its state here would not stop
+    // it. The drain re-reads the row immediately before it sends, and refuses
+    // an expired one — so expiring it now catches the message mid-flight too.
     await tx.execute(sql`
       UPDATE notifications
-      SET state = 'abandoned', last_error = 'A newer sign-in code was sent before this went out.'
+      SET state = CASE WHEN state = 'pending' THEN 'abandoned'::outbox_state ELSE state END,
+          expires_at = now(),
+          last_error = 'A newer sign-in code was sent before this went out.'
       WHERE driver_id = ${driver.id}
-        AND state = 'pending'
+        AND state IN ('pending', 'sending')
         AND dedupe_key LIKE 'driver-sign-in:%'
     `);
 

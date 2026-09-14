@@ -24,7 +24,10 @@ function checked(): string {
   } catch {
     throw new Error('DATABASE_URL is not a URL.');
   }
-  if (!/test/i.test(name)) {
+  // Anchored on a word boundary. A bare substring match let `agmt_testbed`
+  // and `attestation_prod` through — both plausible names for a database
+  // holding real patient records.
+  if (!/(^|[_-])tests?($|[_-])/i.test(name)) {
     throw new Error(
       `These tests delete rows. They will only run against a database whose name says it is ` +
         `for testing, and "${name}" does not. Use something like "agnext_test", or set ` +

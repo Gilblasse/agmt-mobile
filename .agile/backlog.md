@@ -119,6 +119,21 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
   alerts (`docs/07:178-182`) are all `[must]` and none are queued yet — the
   outbox exists and nothing but sign-in writes to it.
 
+## Next — raised by the second Twilio review
+
+- **Reconcile messages stuck at `accepted`** — the drain now counts and warns
+  about messages the provider took and never reported on, which stops it being
+  silent, but nothing resolves them. A job that asks Twilio for the status of
+  each is the real answer, and the same lookup the ambiguous-timeout path
+  already uses.
+- **Somewhere for the office to see `unresolved` rows** — a message nobody
+  knows the fate of is now recorded plainly, but the only place to read it is
+  the database. `getOutbox` and `retryNotification` from the contract need
+  office authentication, which does not exist yet.
+- **Record a driver who has replied STOP** — Twilio refuses them for ever, so
+  every future sign-in code queues, is attempted once and is abandoned. The
+  reason is now in words, but nothing on the roster says so and nobody is told.
+
 ## Observations (not scheduled work)
 
 - Rate limiting is keyed on `x-forwarded-for`, which is caller-controlled
@@ -138,3 +153,12 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 - The office cannot see the outbox: `getOutbox` and `retryNotification` from
   the contract need office authentication, which does not exist yet. Until
   then an abandoned message is visible only in the database.
+- The Twilio status callback has no rate limit and reads an unbounded body.
+  The signature check refuses before any database work, so the exposure is CPU
+  only. Assess when the endpoint is public on a real deployment.
+- `twilio-signature.ts` joins repeated parameters without a separator, which
+  disagrees with `twilio-node`'s comma-joining. Twilio does not send repeated
+  parameters on a status callback. Assess if another Twilio webhook is added.
+- Migration 0008 puts `unresolved` between `sending` and `accepted` in the
+  enum's sort order. Nothing sorts by `state`; worth knowing before something
+  does.

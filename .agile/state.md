@@ -14,13 +14,15 @@ mispricing a trip.
 worker — then the Running Late notice and the recorded contract/envelope debt.
 
 **Status:** outbox worker, Running Late, contract binding, envelope coverage
-and the Twilio adapter implemented, independently reviewed, and repaired. The
-Twilio round found three blockers, seven major and nine minor findings, all
-under a fully green suite — every one a wrong fact recorded rather than a
-crash: a sign-in code sent to a stranger in Maine, a carrier refusal filed as a
-delivery, and a console switch that would have thrown the whole queue away. All
-fixed and re-verified against the reviewer's own attacks
-(`review-findings.md`). 156 tests.
+and the Twilio delivery path implemented, independently reviewed **twice**,
+and repaired. The second review found three more blockers — and two of them
+were created by the first round's own fixes: refunding an attempt for a
+configuration failure gave such a row no exit at all, so twenty unsendable
+emails starved every sign-in code behind them; and the shipped ten-second
+timeout reported an already-delivered message as unreachable, texting a driver
+the same code twice. Both reproduced live under 156 passing tests. All fixed
+and re-verified against the reviewer's own attacks
+(`review-findings.md`). **174 tests.**
 
 **Next action:** an email provider (an unmet `[must]`, see the backlog),
 schedule the drain, and one real message through a real Twilio account. Until

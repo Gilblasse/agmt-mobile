@@ -195,3 +195,62 @@ database was renamed `agnext_test` to match.
 Four are sent at once, so that order is a race; the test passed by accident
 with a batch of two. It now drains one at a time and asserts what the outbox
 actually promises — that an older message is never passed over.
+
+## Phase 2, slice 4 — second review of the same delivery path
+
+The repairs were reviewed by a second independent pass against the running
+server. **Three blockers and six major findings**, every blocker reproduced
+live, under 156 passing tests. Two of the three were *created by the previous
+round's fixes* — which is the useful thing this round taught.
+
+| # | Finding | Disposition |
+|---|---|---|
+| B1 | The M6 fix (a configuration failure refunds its attempt) had no exit: such a row is never abandoned and was retried every 60s, so twenty of them were the twenty oldest due rows on every drain, for ever. Reproduced: 20 unsendable emails queued, ten minutes of drains, **0 texts sent** and the driver's sign-in code `abandoned` unsent with `attempts = 0`. Reachable today — `sign-in` queues an email for any driver with no phone. | **Fixed, two ways.** Email is now `permanent`: there is no email service being waited on, so the row is abandoned once, with a reason, rather than waiting for ever (the real fix is an email provider — an unmet `[must]`, in the backlog). And a genuine provider problem now backs off on a count of its own (`config_attempts`, migration 0008) instead of every minute, so it stops crowding the queue. **Verified failing first:** with the flat 60s restored, the sign-in code expires unsent. |
+| B2 | `AbortSignal.timeout` at the shipped 10s default against a provider answering in 11s reported `Could not reach Twilio` — a retryable failure. The POST had already arrived and Twilio had already created the message. Reproduced end to end: **one queued message, two texts**, `unresolved: 0` throughout. Both halves of the sentence the README gives as the outbox's reason to exist, at once. | **Fixed.** A failure is now classified by whether the request ever left this machine. `ECONNREFUSED`/`ENOTFOUND` is safe to retry; a timeout or a dropped socket is not, so the adapter asks Twilio what it actually has (`GET Messages.json?To=…`, matched on body and creation time). If Twilio has it → accepted, with its reference. If not → retry. If Twilio cannot be asked either → `unresolved`: never retried, never abandoned, recorded in words for a person. |
+| B3 | `UPDATE … WHERE claimed_by = worker` then `result.accepted++` with no rowcount check. A zero-row update does not throw. Reproduced: the drain reported `accepted: 1` for a row it left `pending` with `sent_at NULL` — which the next drain sent again. | **Fixed** — every outcome goes through `record()`, which counts only if the update matched, and otherwise logs and counts `unresolved`. The write is also now conditional on `state = 'sending'`. |
+| M1 | `OUTBOX_LEASE_SECONDS="2m"` → `Number` is `NaN` → the load-time assertion `NaN >= NaN` is false, so the guard *"to fail at load rather than duplicate messages at three in the morning"* did not fire; `make_interval(secs => NaN)` then took every drain down. `.env.example` documents this variable. | **Fixed** — validated where the message can name the setting; tested against `'2m'`, `'NaN'`, `'-30'`, `'Infinity'` and a too-small value. |
+| M2 | B3 of the previous round moved 21408/21612/21606 out of the *permanent* set but they still spent the retry budget: 60+300+900+3600s = **81 minutes to abandon the queue** for a wrong token, a console switch, a rate limit or an outage. Reproduced for 20003, 21606, 21408, 429 and 503 — all `abandoned attempts=5`. The previous commit message claimed the opposite. | **Fixed** — a `NOT_THIS_MESSAGE` set plus 401/403/429/5xx now return `cause: 'provider'`, which does not consume the message at all. The message waits for the office, which is what the file had been claiming all along. |
+| M3 | `accepted` was terminal with nothing watching it: no expiry sweep, no sweeper, no alarm. Three silent ways in, including the documented default of no status callback, and a sender returning no reference — for which no callback can *ever* match the row. | **Fixed enough to stop being silent** — the drain counts messages accepted more than fifteen minutes ago with no report and the job logs a warning naming it; the README says what a climbing number means. A full reconciliation job is in the backlog. |
+| M4 | Masking the adapter's own sentence missed the way numbers actually reach `last_error`: Twilio quotes the number inside its own message. Reproduced: `"The 'To' number +18455559906 is not a valid phone number"` stored verbatim. | **Fixed** — `redactNumbers()` over anything the provider wrote, and the permanent codes now carry a plain-English explanation instead of Twilio's wording at all. |
+| M5 | The expiry sentence was rendered in the database session's timezone, with microseconds and a UTC offset — CLAUDE.md #3, in a line a dispatcher is meant to read. Reproduced across three session timezones. | **Fixed** — `to_char(… AT TIME ZONE OFFICE_TIME_ZONE)` and plain words: *"only good until 5:08 pm on Monday 14 September."* |
+| M6 | The supersede `WHERE state = 'pending'` missed a code the drain had already claimed, so the dead code was texted *after* the live one. | **Fixed** — supersede sets `expires_at = now()` on `sending` rows too, and `stillOurs` re-reads the row immediately before sending and refuses an expired one. One mechanism rather than two. |
+
+### Minor — fixed
+
+A base URL with a path was accepted and the path silently discarded (an
+operator fronting Twilio with a gateway would send the auth token to the
+wrong path); the test-database guard was a bare substring match, so
+`agmt_testbed` and `attestation_prod` both passed it (now anchored); migration
+0007's comment claimed `delivered_at` and `sent_at` record the same moment
+(they do not, and saying so reintroduced the conflation the migration undoes);
+a landline reported by callback landed in `failed` while the same fact from
+the API landed in `abandoned`; 21214 was abandoned as permanent though Twilio
+means "cannot be reached", which often is not; a driver who replied STOP is
+now explained in words, because until somebody talks to them they can never
+sign in again.
+
+### Tests the reviewer called out, fixed
+
+`assert.match(error, /0101|\*\*\*/)` could not fail — `masked()` always emits
+`***` and the other branch was dead. Nothing covered a signature that decodes
+to exactly twenty bytes, and nothing covered the file's proudest claim: that
+the signed string is the configured callback URL and not the URL the request
+appears to have arrived at — a regression to `request.url` would have kept all
+twelve tests green. Both are covered now, the second with a spoofed `Host`.
+
+### Clean, per the reviewer — do not re-verify
+
+`toE164` across 38 roster-shaped inputs, including the legacy roster's own
+shapes; the signature check against nine attacks; the `state='accepted'` guard
+on the callback; that the M4 and M6 tests of the previous round genuinely fail
+against the unfixed code; `refuseInProduction`, the `MG`+32hex discrimination,
+the drained 201 body, and the string/number error-code coercion.
+
+### Deferred as observations
+
+The callback endpoint has no rate limit and an unbounded `request.text()` —
+the 403 precedes any database work, so the exposure is CPU only.
+`twilio-signature.ts` concatenates repeated parameters without a separator,
+which disagrees with `twilio-node`; Twilio does not send repeated parameters
+on status callbacks. `ADD VALUE … BEFORE 'sent'` changes the enum's sort order,
+which matters only if someone writes `ORDER BY state`.

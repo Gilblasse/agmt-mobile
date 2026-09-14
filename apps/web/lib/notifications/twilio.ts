@@ -65,6 +65,11 @@ export type TwilioConfig = {
  * Two kinds qualify: the number is not one we can text, or the message itself
  * is malformed. Note what is deliberately *absent*.
  *
+ * 21214 used to be here, described in this file as "'To' is not a valid mobile
+ * number". Twilio's own meaning is "'To' phone number cannot be reached",
+ * which is not always permanent — so abandoning on it threw away a message
+ * that a later attempt would have delivered.
+ *
  * `21408` (no permission to send to that region) and `21612` (this sender
  * cannot reach that number) read like the recipient's fault and are not: both
  * are account settings, toggled in the Twilio console. Listing them as
@@ -77,13 +82,51 @@ export type TwilioConfig = {
  */
 const CANNOT_EVER_SEND = new Set([
   21211, // 'To' is not a valid phone number
-  21214, // 'To' is not a valid mobile number
   21401, // invalid phone number
   21610, // the recipient replied STOP
   21614, // 'To' is not a mobile number
   21602, // no message body
   21617, // the body is longer than Twilio will take
 ]);
+
+/**
+ * Codes that are about the account or the provider, not about this message.
+ *
+ * These look like failures and are really settings: a rotated token, a
+ * geographic permission left off, a `From` number that cannot text, Twilio
+ * having a bad hour. Moving them out of the permanent set was not enough —
+ * they still spent the message's retry budget, so a wrong token over one lunch
+ * abandoned every queued sign-in code in eighty-one minutes. They must not
+ * count at all; the message waits for the office, which is what the paragraph
+ * above has always claimed it does.
+ */
+const NOT_THIS_MESSAGE = new Set([
+  20003, // authenticate — the token is wrong or rotated
+  20005, // the account is suspended
+  20429, // too many requests
+  21408, // no permission to send to that region: a console checkbox
+  21606, // the 'From' number is not ours, or cannot send texts
+  21612, // this sender cannot reach that number
+  30001, // queue overflow
+  30002, // the account is suspended
+]);
+
+/**
+ * What a permanent refusal means, in words the office can act on.
+ *
+ * `last_error` is where somebody looks when a driver says they never got a
+ * code, and "21610" is not an answer. 21610 in particular is not a fault at
+ * all: the driver texted STOP, every future code will be refused the same way,
+ * and until somebody talks to them they can never sign in again.
+ */
+const IN_PLAIN_WORDS: Record<number, string> = {
+  21211: 'that is not a phone number Twilio will take.',
+  21401: 'that is not a phone number Twilio will take.',
+  21610: 'this driver replied STOP to a text, so Twilio will not send to them. Until they text START back, no code can reach them and they cannot sign in. Somebody has to tell them.',
+  21614: 'that number is a landline and cannot receive texts.',
+  21602: 'the message had no text in it.',
+  21617: 'the message was too long to send.',
+};
 
 /** A Messaging Service SID, as opposed to an alphanumeric sender ID like `MGTransport`. */
 const MESSAGING_SERVICE_SID = /^MG[0-9a-f]{32}$/i;
@@ -129,12 +172,22 @@ export function checkBaseUrl(raw: string): URL {
     throw new Error(`TWILIO_BASE_URL is not a URL: ${raw}`);
   }
   const local = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname);
-  if (url.protocol === 'https:') return url;
-  if (url.protocol === 'http:' && local) return url;
-  throw new Error(
-    `TWILIO_BASE_URL must be https (it carries the auth token and every sign-in code). ` +
-      `Plain http is allowed only for a stand-in on this machine. Got: ${raw}`,
-  );
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) {
+    throw new Error(
+      `TWILIO_BASE_URL must be https (it carries the auth token and every sign-in code). ` +
+        `Plain http is allowed only for a stand-in on this machine. Got: ${raw}`,
+    );
+  }
+  if (url.pathname !== '/' || url.search || url.hash) {
+    // The request path is built from the account SID against this address, so
+    // a path here is silently discarded: an operator fronting Twilio with a
+    // gateway at /twilio-proxy would send the account's auth token to the
+    // gateway's root instead, with nothing to say so.
+    throw new Error(
+      `TWILIO_BASE_URL must be a bare host with no path (the API path is added to it). Got: ${raw}`,
+    );
+  }
+  return url;
 }
 
 export function twilioSender(config: TwilioConfig): Sender {
@@ -184,35 +237,41 @@ export function twilioSender(config: TwilioConfig): Sender {
       else form.set('From', config.from);
       if (config.statusCallbackUrl) form.set('StatusCallback', config.statusCallbackUrl);
 
+      const attemptedAt = Date.now();
       let response: Response;
       try {
-        response = await call(
-          new URL(`/2010-04-01/Accounts/${config.accountSid}/Messages.json`, base).toString(),
-          {
-            method: 'POST',
-            headers: {
-              // Basic auth. Never logged: the token is a standing credential.
-              authorization: `Basic ${Buffer.from(`${config.accountSid}:${config.authToken}`).toString('base64')}`,
-              'content-type': 'application/x-www-form-urlencoded',
-            },
-            body: form.toString(),
-            signal: AbortSignal.timeout(timeoutMs),
-          },
-        );
+        response = await call(messagesUrl(), {
+          method: 'POST',
+          headers: authHeaders(),
+          body: form.toString(),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
       } catch (error) {
-        // A network failure says nothing about the message. Try again later.
-        return { accepted: false, error: `Could not reach Twilio: ${String(error)}` };
+        // A failure to *connect* says nothing reached Twilio, so trying again
+        // is safe. A timeout or a dropped socket says the opposite: the
+        // request may well have arrived and the message may well exist. Sending
+        // it again is how a driver is texted the same code twice — the thing
+        // this whole queue exists to prevent — and it happened with the
+        // shipped ten-second default against a provider that answered in
+        // eleven. So ask Twilio what it actually has before deciding.
+        if (neverLeftThisMachine(error)) {
+          return { accepted: false, error: `Could not reach Twilio: ${describe(error)}` };
+        }
+        return reconcile(to, message.body, attemptedAt, describe(error));
       }
 
       const body = await readBody(response);
 
       if (!response.ok) {
         const code = numeric(body?.code);
-        const detail = body?.message ?? `HTTP ${response.status}`;
+        const detail =
+          (code !== undefined ? IN_PLAIN_WORDS[code] : undefined) ??
+          redactNumbers(body?.message ?? `HTTP ${response.status}`);
         return {
           accepted: false,
           error: `Twilio refused the message (${code ?? response.status}): ${detail}`,
           permanent: code !== undefined && CANNOT_EVER_SEND.has(code),
+          ...(notThisMessage(code, response.status) ? { cause: 'provider' as const } : {}),
         };
       }
 
@@ -221,10 +280,12 @@ export function twilioSender(config: TwilioConfig): Sender {
       const status = body?.status;
       if (status === 'failed' || status === 'undelivered' || status === 'canceled') {
         const code = numeric(body?.error_code);
+        const why = code !== undefined ? IN_PLAIN_WORDS[code] : undefined;
         return {
           accepted: false,
-          error: `Twilio could not send the message (${status}${code ? `, ${code}` : ''}).`,
+          error: `Twilio could not send the message (${status}${code ? `, ${code}` : ''})${why ? `: ${why}` : '.'}`,
           permanent: code !== undefined && CANNOT_EVER_SEND.has(code),
+          ...(notThisMessage(code, response.status) ? { cause: 'provider' as const } : {}),
         };
       }
 
@@ -234,6 +295,117 @@ export function twilioSender(config: TwilioConfig): Sender {
       return { accepted: true, reference: typeof body?.sid === 'string' ? body.sid : null };
     },
   };
+
+  function messagesUrl(): string {
+    return new URL(`/2010-04-01/Accounts/${config.accountSid}/Messages.json`, base).toString();
+  }
+
+  function authHeaders(): Record<string, string> {
+    return {
+      // Basic auth. Never logged: the token is a standing credential.
+      authorization: `Basic ${Buffer.from(`${config.accountSid}:${config.authToken}`).toString('base64')}`,
+      'content-type': 'application/x-www-form-urlencoded',
+    };
+  }
+
+  /**
+   * Asks Twilio whether it already has the message we could not get an answer
+   * about.
+   *
+   * Three outcomes, and the third is the point: if Twilio cannot be asked
+   * either, nobody knows whether the driver was texted, and the honest thing
+   * is to say so rather than guess. The outbox parks it for a person instead
+   * of sending again or giving up.
+   */
+  async function reconcile(
+    to: string,
+    body: string,
+    attemptedAt: number,
+    why: string,
+  ): Promise<Sent> {
+    const query = new URLSearchParams({ To: to, PageSize: '20' });
+    let found: { sid?: unknown; body?: unknown; date_created?: unknown }[] | null = null;
+    try {
+      const response = await call(`${messagesUrl()}?${query}`, {
+        method: 'GET',
+        headers: authHeaders(),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (response.ok) {
+        const listed = (await response.json()) as { messages?: unknown };
+        if (Array.isArray(listed.messages)) found = listed.messages;
+      } else {
+        await response.text();
+      }
+    } catch {
+      found = null;
+    }
+
+    if (found === null) {
+      return {
+        accepted: false,
+        cause: 'unresolved',
+        error:
+          `Twilio did not answer (${why}), and asking it what it has did not answer either. ` +
+          `This message may or may not have been sent; somebody has to look before it is sent again.`,
+      };
+    }
+
+    const match = found.find(
+      (m) =>
+        m.body === body &&
+        typeof m.date_created === 'string' &&
+        // Bodies repeat — "your trip was cancelled" is the same words every
+        // time — so an old message with the same text is not this one.
+        Math.abs(Date.parse(m.date_created) - attemptedAt) < 10 * 60_000,
+    );
+    if (match && typeof match.sid === 'string') {
+      return { accepted: true, reference: match.sid };
+    }
+    return {
+      accepted: false,
+      error: `Twilio did not answer (${why}), and has no record of the message, so it will be tried again.`,
+    };
+  }
+}
+
+/**
+ * Whether a `fetch` failure means the request never left this machine.
+ *
+ * DNS and a refused connection are safe to retry. A timeout, an abort or a
+ * socket that died mid-flight are not: the request may have arrived.
+ */
+function neverLeftThisMachine(error: unknown): boolean {
+  const code = (error as { cause?: { code?: unknown }; code?: unknown } | null)?.cause?.code
+    ?? (error as { code?: unknown } | null)?.code;
+  return (
+    typeof code === 'string' &&
+    ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ERR_INVALID_URL', 'ERR_TLS_CERT_ALTNAME_INVALID'].includes(code)
+  );
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
+
+/** Whether a refusal is about the account or the provider rather than the message. */
+function notThisMessage(code: number | undefined, status: number): boolean {
+  if (code !== undefined && NOT_THIS_MESSAGE.has(code)) return true;
+  // 401/403 is a credential, 429 is a rate limit, 5xx is Twilio. None of them
+  // are anything this message did.
+  return status === 401 || status === 403 || status === 429 || status >= 500;
+}
+
+/**
+ * Takes phone numbers out of text the provider wrote.
+ *
+ * Twilio quotes the number back in its own error messages — "The 'To' number
+ * +18455559906 is not a valid phone number" — and that string is stored in
+ * `notifications.last_error`, which is read by whoever is looking at the
+ * queue. Masking the one sentence this file composes itself was not enough.
+ */
+export function redactNumbers(text: string): string {
+  return text.replace(/\+?\d[\d\-. ()]{6,}\d/g, (run) => `***${run.replace(/\D/g, '').slice(-4)}`);
 }
 
 type TwilioBody = {

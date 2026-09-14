@@ -85,10 +85,15 @@ describe('taking a delivery report from Twilio', () => {
     assert.equal(row.delivered_at, null);
   });
 
-  it('says plainly when the number itself cannot be texted', async () => {
+  it('says plainly when the number itself cannot be texted, and gives up on it', async () => {
     const id = await accepted('SM_landline');
     await post({ MessageSid: 'SM_landline', MessageStatus: 'failed', ErrorCode: '21614' });
-    assert.match((await stateOf(id)).last_error, /cannot be texted/);
+    const row = await stateOf(id);
+    assert.match(row.last_error, /cannot be texted/);
+    // `abandoned`, the same as when the Messages API says so up front. Two
+    // states for one fact would mean reading the queue by which route the bad
+    // news arrived.
+    assert.equal(row.state, 'abandoned');
   });
 
   it('ignores the statuses that only say it is on its way', async () => {
@@ -150,6 +155,58 @@ describe('refusing everybody else', () => {
     assert.equal((await post(fields, '')).status, 403);
     assert.equal((await post(fields, 'AAAA')).status, 403);
     assert.equal((await post(fields, '!!!not base64!!!')).status, 403);
+  });
+
+  it('refuses garbage that happens to be the right length', async () => {
+    // A length check is not a comparison. These decode to exactly the twenty
+    // bytes of a SHA-1, so they get past the guard and have to be rejected by
+    // the compare itself.
+    const id = await accepted('SM_right_length');
+    const fields = { MessageSid: 'SM_right_length', MessageStatus: 'delivered' };
+    for (const guess of ['A'.repeat(27) + '=', Buffer.alloc(20).toString('base64')]) {
+      assert.equal(Buffer.from(guess, 'base64').length, 20, 'the length guard would let this through');
+      assert.equal((await post(fields, guess)).status, 403);
+    }
+    assert.equal((await stateOf(id)).state, 'accepted', 'untouched');
+  });
+
+  it('checks the signature against the address we gave Twilio, not the one the request claims', async () => {
+    // Behind a proxy, the Host and scheme a handler sees are whatever the
+    // proxy set. Signing the URL the request appears to have arrived at would
+    // let somebody who can influence those choose the string being signed.
+    const id = await accepted('SM_proxy');
+    const fields = { MessageSid: 'SM_proxy', MessageStatus: 'delivered' };
+    const spoofed = 'https://attacker.example/api/notifications/twilio-status';
+
+    // Signed for the address the request pretends to have arrived at: refused.
+    const wrong = await POST(
+      new Request(spoofed, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          'x-twilio-signature': sign(spoofed, fields),
+          host: 'attacker.example',
+          'x-forwarded-proto': 'https',
+        },
+        body: new URLSearchParams(fields).toString(),
+      }),
+    );
+    assert.equal(wrong.status, 403);
+    assert.equal((await stateOf(id)).state, 'accepted');
+
+    // Signed for the configured address, arriving at the spoofed one: taken.
+    const right = await POST(
+      new Request(spoofed, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          'x-twilio-signature': sign(CALLBACK, fields),
+        },
+        body: new URLSearchParams(fields).toString(),
+      }),
+    );
+    assert.equal(right.status, 204);
+    assert.equal((await stateOf(id)).state, 'sent');
   });
 
   it('is not there at all until Twilio has been told to post to it', async () => {

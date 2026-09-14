@@ -28,14 +28,23 @@ export type Message = {
  * later, on a status callback, or never. Calling that field `delivered` is how
  * a carrier-rejected message came to be recorded as a success.
  *
- * `cause: 'configuration'` marks a failure that has nothing to do with this
- * message — no provider configured, a bad API address. The outbox must not
- * spend the message's retry budget on those, or an afternoon with the
- * credentials unset would abandon the whole queue.
+ * `cause` names a failure that is not about this message:
+ *
+ *  - `'provider'` — no provider configured, a rotated token, a switch off in
+ *    the console, a rate limit, an outage. The outbox must not spend the
+ *    message's retry budget on these, or a long lunch with the credentials
+ *    unset would abandon the whole queue. It must not retry them every minute
+ *    either: twenty rows that can never send are the twenty oldest rows due,
+ *    and they fill every batch while a driver's sign-in code expires behind
+ *    them.
+ *  - `'unresolved'` — the request reached the provider and the answer did not
+ *    come back. This is **not** a failure to send. Retrying it is how a driver
+ *    gets the same code twice; abandoning it is how they get nothing. The row
+ *    stops and a person decides.
  */
 export type Sent =
   | { accepted: true; reference?: string | null }
-  | { accepted: false; error: string; permanent?: boolean; cause?: 'configuration' };
+  | { accepted: false; error: string; permanent?: boolean; cause?: 'provider' | 'unresolved' };
 
 export interface Sender {
   describe(): string;
@@ -57,7 +66,7 @@ export const unconfiguredSender: Sender = {
     return {
       accepted: false,
       error: 'No delivery provider is configured. See docs/06-external-services.md.',
-      cause: 'configuration',
+      cause: 'provider',
     };
   },
 };
@@ -139,7 +148,7 @@ function fromEnvironment(env: SendingEnv = process.env): Sender {
     return {
       describe: () => `Twilio is misconfigured: ${why}`,
       async send() {
-        return { accepted: false, error: why, cause: 'configuration' };
+        return { accepted: false, error: why, cause: 'provider' };
       },
     };
   }
@@ -149,10 +158,17 @@ function fromEnvironment(env: SendingEnv = process.env): Sender {
     describe: () => described,
     async send(message) {
       if (message.channel !== 'sms') {
+        // Permanent, not `provider`. There is no email service being waited on
+        // — none has been chosen, so nothing about this message will change by
+        // trying later. Treating it as transient kept twenty unsendable emails
+        // permanently at the head of the queue and starved every text behind
+        // them. Abandoning says so once, in the row, where the office can see
+        // it. The real fix is an email provider: an unmet [must]
+        // (docs/07-feature-checklist.md:182), tracked in the backlog.
         return {
           accepted: false,
           error: `No provider is configured for ${message.channel}. See docs/06-external-services.md.`,
-          cause: 'configuration',
+          permanent: true,
         };
       }
       return sms.send(message);

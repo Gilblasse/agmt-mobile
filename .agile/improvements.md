@@ -136,3 +136,26 @@ database it did not own, and it took the reviewer to notice. Any test that
 deletes must first prove it is talking to a database that exists to be
 deleted from. Done here; do it at the start of the next slice that needs a
 new fixture, not after.
+
+## Round 5 — reviewing the repairs
+
+**The finding worth keeping.** Two of the three blockers this round were
+*created by last round's fixes*, and neither was a careless edit — each was a
+correct local fix with an unexamined consequence. Refunding an attempt so a
+provider outage cannot abandon the queue is right; it also removed the only
+exit that kind of row had, and nobody asked what happens to a message that can
+now never leave any state. Classifying a network failure as retryable is right;
+it also covers the one network failure that is not a failure.
+
+**Improvement for the next iteration:** when a fix removes a way out of a
+state — a retry that no longer counts, a failure that no longer abandons, a
+guard that no longer fires — write down the new state diagram before writing
+the code, and name the exit. If there is no exit, that is the bug, and it will
+not show up in a test of the thing being fixed.
+
+**Second improvement, and the reason the round was cheap:** the rule from
+round 4 held again. Every blocker fix this round has a test that was run
+against the unfixed code and watched to fail — and the first version of the
+starvation test *passed* against the broken back-off, which is exactly what
+that rule exists to catch. Had it not been run against the revert, a test
+asserting nothing would have gone in as evidence.
