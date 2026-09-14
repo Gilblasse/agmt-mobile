@@ -56,12 +56,26 @@ Every `bun run` step in `.github/workflows/ci.yml` was run locally with the same
 `--filter` invocations, and `bun install --frozen-lockfile` was checked
 separately. All exited 0. **The workflow has not yet run on GitHub Actions.**
 
+## The database
+
+Run against a real PostgreSQL **16.13** instance (installed locally; Docker is
+unavailable here).
+
+`db/migrations/0001_init.sql` applies clean to an empty database and builds
+exactly what `CLAUDE.md` claims: **17 tables, 1 view, 7 enums, 46 indexes,
+12 foreign keys and 8 check constraints** — among them
+`price_or_reason_never_both` and `blacklist_needs_a_reason`.
+
+`db/smoke.sql` → `schema smoke test: all assertions passed`, and it leaves
+nothing behind: every seeded table reads 0 rows afterwards.
+
+Both root scripts work against `$PGDATABASE`. `bun run db:up` fails if re-run
+against an already-migrated database (`type "office_role" already exists`) —
+correct for a non-idempotent init migration under `ON_ERROR_STOP=1`, not a
+defect.
+
 ## Not verified
 
-- `db/migrations/0001_init.sql` and `db/smoke.sql` were **not** run: no
-  PostgreSQL available here and Docker is unavailable. They passed in the
-  original kit and the SQL is unchanged. The `db:up` / `db:smoke` scripts
-  themselves are therefore unexercised.
 - `expo-sqlite` cold-start with a corrupt row — no offline queue exists yet.
 - Anything needing a device or simulator. The bundles export; they have not
   been launched on a phone.
