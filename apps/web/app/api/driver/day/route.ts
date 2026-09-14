@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
+import type { Api, Result } from '@ag/rules/api';
 import { and, asc, eq } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { trips } from '@/lib/db/schema';
 import { authenticateDriver } from '@/lib/auth/driver';
 import { fail, ok, PRIVATE, withResult, onlyGet} from '@/lib/api/result';
-import { progressToRules, type DriverProgressLabel } from '@/lib/db/enums';
+import { progressToRules, toLabel } from '@/lib/db/enums';
 import { officeToday, officeTomorrow, serverClock } from '@/lib/office-clock';
 import { timeSortValue } from '@ag/rules';
 
@@ -51,29 +53,55 @@ export const GET = withResult(async (request: Request) => {
     (a, b) => timeSortValue(a.scheduledTime) - timeSortValue(b.scheduledTime),
   );
 
-  // Changes whenever anything on this driver's day changes, so the phone can
-  // poll cheaply and skip a redraw when nothing has moved. Derived rather than
-  // stored: the newest `updated_at` on the day plus how many trips there are
-  // catches an edit, an addition and a removal alike.
-  const version = `${rows.length}:${rows.reduce(
-    (newest, trip) => (trip.updatedAt > newest ? trip.updatedAt : newest),
-    '',
-  )}`;
+  // A digest of the whole set, not the newest stamp in it. `max(updated_at)`
+  // looked equivalent and was not: a long office transaction commits a row
+  // stamped when that transaction *began*, so an edit could land with a
+  // timestamp older than one already seen and the token would not move — the
+  // phone skips the redraw and the driver keeps the old pickup address. A
+  // digest moves whenever any row's stamp changes in either direction.
+  const version = createHash('sha256')
+    .update(rows.map((trip) => `${trip.id}:${trip.updatedAt}`).join(','))
+    .digest('hex')
+    .slice(0, 16);
 
-  return ok(
-    {
+  // Bound to the contract, so a payload that drifts from `Api` is a compile
+  // error rather than something a client discovers. Nothing checked this
+  // before: `ok<T>` infers T from its argument, so any shape type-checked.
+  const payload: DayPayload = {
       driver: auth.driver,
       date,
       version,
       readOnly: which === 'tomorrow',
+      // Named rather than spread: a driver gets what they need to do the trip.
+      // Spreading the row also handed the phone the Medicaid number, the
+      // quoted price and an office email.
       trips: ordered.map((trip) => ({
-        ...trip,
-        progress: progressToRules(trip.driverProgress as DriverProgressLabel),
+        id: trip.id,
+        serviceDate: trip.serviceDate,
+        scheduledTime: trip.scheduledTime,
+        startTime: trip.startTime,
+        passengerName: trip.passengerName,
+        phone: trip.phone,
+        transport: trip.transport,
+        pickup: trip.pickup,
+        dropoff: trip.dropoff,
+        pickupNotes: trip.pickupNotes,
+        dropoffNotes: trip.dropoffNotes,
+        notes: trip.notes,
+        dispatchStatus: trip.dispatchStatus as DayPayload['trips'][number]['dispatchStatus'],
+        progress: progressToRules(toLabel(trip.driverProgress)),
+        pickupArrivalAt: trip.pickupArrivalAt,
+        pickupDepartureAt: trip.pickupDepartureAt,
+        dropoffArrivalAt: trip.dropoffArrivalAt,
+        dropoffDepartureAt: trip.dropoffDepartureAt,
       })),
       ...serverClock(now),
-    },
-    PRIVATE,
-  );
+  };
+
+  return ok(payload, PRIVATE);
 });
 
-export const { POST, PUT, PATCH, DELETE } = onlyGet;
+type DayPayload =
+  Awaited<ReturnType<Api['getDriverDay']>> extends Result<infer D> ? D : never;
+
+export const { POST, PUT, PATCH, DELETE, OPTIONS } = onlyGet;

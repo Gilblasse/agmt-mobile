@@ -130,4 +130,4 @@ function withProgress<T extends { driverProgress: string }>(trip: T) {
   return { ...trip, progress: progressToRules(toLabel(trip.driverProgress)) };
 }
 
-export const { GET, PUT, PATCH, DELETE } = onlyPost;
+export const { GET, PUT, PATCH, DELETE, OPTIONS } = onlyPost;

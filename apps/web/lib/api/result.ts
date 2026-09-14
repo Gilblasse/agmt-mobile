@@ -89,7 +89,38 @@ export const PRIVATE: ResponseInit = {
  *
  *   export const { GET, PUT, PATCH, DELETE } = onlyPost;
  */
-const wrongMethod = () => fail('validation', 'That is not something you can do at this address.', 405);
+function wrongMethod(allow: string) {
+  return () => {
+    // `Allow` is required on a 405, and without an explicit OPTIONS the
+    // framework advertised every verb these objects export — actively wrong
+    // discovery data on a POST-only endpoint.
+    const body: Result<never> = {
+      ok: false,
+      reason: 'not-found',
+      message: 'That is not something you can do at this address.',
+    };
+    return Response.json(body, { status: 405, headers: { allow } });
+  };
+}
 
-export const onlyPost = { GET: wrongMethod, PUT: wrongMethod, PATCH: wrongMethod, DELETE: wrongMethod };
-export const onlyGet = { POST: wrongMethod, PUT: wrongMethod, PATCH: wrongMethod, DELETE: wrongMethod };
+function allowed(allow: string) {
+  return () => new Response(null, { status: 204, headers: { allow } });
+}
+
+const POST_ONLY = 'POST, OPTIONS';
+const GET_ONLY = 'GET, HEAD, OPTIONS';
+
+export const onlyPost = {
+  GET: wrongMethod(POST_ONLY),
+  PUT: wrongMethod(POST_ONLY),
+  PATCH: wrongMethod(POST_ONLY),
+  DELETE: wrongMethod(POST_ONLY),
+  OPTIONS: allowed(POST_ONLY),
+};
+export const onlyGet = {
+  POST: wrongMethod(GET_ONLY),
+  PUT: wrongMethod(GET_ONLY),
+  PATCH: wrongMethod(GET_ONLY),
+  DELETE: wrongMethod(GET_ONLY),
+  OPTIONS: allowed(GET_ONLY),
+};

@@ -129,4 +129,4 @@ export const POST = withResult(async (request: Request) => {
   return ok({ token, driver }, PRIVATE);
 });
 
-export const { GET, PUT, PATCH, DELETE } = onlyPost;
+export const { GET, PUT, PATCH, DELETE, OPTIONS } = onlyPost;

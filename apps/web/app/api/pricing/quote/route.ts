@@ -88,4 +88,4 @@ export async function POST(request: Request) {
   }
 }
 
-export const { GET, PUT, PATCH, DELETE } = onlyPost;
+export const { GET, PUT, PATCH, DELETE, OPTIONS } = onlyPost;

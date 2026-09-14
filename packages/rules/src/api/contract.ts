@@ -18,6 +18,47 @@ import type {
 // ---------------------------------------------------------------------------
 
 /**
+ * A trip as the driver's phone receives it: the stored row, plus the step in
+ * the vocabulary the rules use (`'IN ROUTE'`, not `'in_route'`).
+ *
+ * Deliberately not `BoardTrip`, and deliberately not the whole row. The board
+ * type carries `outcome`, `lateByMinutes` and `waitingMs` that the office
+ * computes — the driver app will need `waitingMs` for its wait timer, and that
+ * is recorded as outstanding work rather than declared here and not sent.
+ *
+ * And a phone gets what a driver needs to do the trip, not every column: the
+ * stored row also holds the Medicaid number, the quoted price and the email of
+ * whoever in the office last set the status. None of that helps a driver, and
+ * all of it is on a device that gets lost.
+ *
+ * No vehicle here yet: `Trip` declares `vehicleLabel`, but the `trips` table
+ * carries only `vehicle_id`, so a label needs a join. Recorded rather than
+ * promised.
+ */
+export type DriverDayTrip = {
+  id: string;
+  serviceDate: DateKey;
+  scheduledTime: string | null;
+  startTime: string | null;
+  passengerName: string;
+  phone: string | null;
+  transport: string | null;
+  pickup: string;
+  dropoff: string | null;
+  pickupNotes: string | null;
+  dropoffNotes: string | null;
+  notes: string | null;
+  /** The office's call on the trip. The driver sees it; only the office sets it. */
+  dispatchStatus: DispatchStatus;
+  /** Where the driver is, in the vocabulary the rules use. */
+  progress: DriverProgress;
+  pickupArrivalAt: string | null;
+  pickupDepartureAt: string | null;
+  dropoffArrivalAt: string | null;
+  dropoffDepartureAt: string | null;
+};
+
+/**
  * Every write answers with one of these. A failure is never an exception the
  * client has to guess at — it carries a reason it can act on, and `partial`
  * says whether anything was written before it stopped.
@@ -158,8 +199,8 @@ export interface Api {
    * against; `timeZone` says whose clock that is. `readOnly` marks a day the
    * driver may look at but not tap.
    */
-  getDriverDay(q: { which: 'today' | 'tomorrow'; date?: DateKey }): Promise<Result<{
-    driver: Driver; date: DateKey; trips: BoardTrip[];
+  getDriverDay(q: { which: 'today' | 'tomorrow' }): Promise<Result<{
+    driver: Driver; date: DateKey; trips: DriverDayTrip[];
     serverNow: string; serverClock: string; timeZone: string;
     readOnly: boolean; version: string;
   }>>;

@@ -72,6 +72,9 @@ before(async () => {
 
 beforeEach(async () => {
   await sql`DELETE FROM rate_limits WHERE bucket LIKE '%:198.51.100.%'`;
+  // The running-late limit is keyed on the driver, not the address, so the
+  // per-request address rotation above does not clear it.
+  await sql`DELETE FROM rate_limits WHERE bucket LIKE ${'eta:%'}`;
   await sql`DELETE FROM trips WHERE driver_id IN (${mineId}, ${otherId}) OR passenger_name = 'Test Passenger'`;
   await sql`DELETE FROM driver_sign_in_codes WHERE driver_id IN (${mineId}, ${otherId})`;
   await sql`DELETE FROM notifications WHERE driver_id IN (${mineId}, ${otherId})`;
@@ -84,6 +87,9 @@ after(async () => {
   await sql`DELETE FROM trips WHERE driver_id IN (${mineId}, ${otherId}) OR passenger_name = 'Test Passenger'`;
   await sql`DELETE FROM drivers WHERE name IN (${MINE}, ${OTHER})`;
   await sql`DELETE FROM rate_limits WHERE bucket LIKE '%:198.51.100.%'`;
+  // The running-late limit is keyed on the driver, not the address, so the
+  // per-request address rotation above does not clear it.
+  await sql`DELETE FROM rate_limits WHERE bucket LIKE ${'eta:%'}`;
   await sql.end();
 });
 
@@ -495,6 +501,22 @@ describe('telling dispatch you are running late', () => {
     assert.match(row!.notes, /DRIVER RUNNING LATE/);
   });
 
+  it('does not stack identical warnings when the driver taps twice at once', async () => {
+    // Sequentially, this passed against an implementation with no dedupe
+    // transaction at all. Eight simultaneous taps left seven extra lines on
+    // the dispatcher's note, and told seven callers it had not been flagged.
+    const trip = await makeTrip(mineId, await officeToday());
+    await Promise.all(
+      Array.from({ length: 8 }, () => eta(mineToken, trip, { minutesFromNow: 10 })),
+    );
+    const [row] = await sql`SELECT notes FROM trips WHERE id = ${trip}`;
+    assert.equal(
+      (row!.notes.match(/DRIVER RUNNING LATE/g) ?? []).length,
+      1,
+      'one warning on the board however many taps arrive together',
+    );
+  });
+
   it('does not stack identical warnings when the driver taps twice', async () => {
     const trip = await makeTrip(mineId, await officeToday());
     await eta(mineToken, trip, { minutesFromNow: 10 });
@@ -510,12 +532,43 @@ describe('telling dispatch you are running late', () => {
     assert.equal(c, 2);
   });
 
-  it('strips anything that is not words out of the reason', async () => {
+  it('strips anything that is not words, everywhere it is stored', async () => {
     const trip = await makeTrip(mineId, await officeToday());
     await eta(mineToken, trip, { minutesFromNow: 5, reason: 'Traffic <script>x</script> & "stuff"' });
     const [row] = await sql`SELECT notes FROM trips WHERE id = ${trip}`;
     assert.doesNotMatch(row!.notes, /[<>&"]/, 'the note is words only');
     assert.match(row!.notes, /Traffic/);
+
+    // The same untrusted string is stored twice, and the event payload is
+    // served to the office through getTripActivity. It was going in raw.
+    const [event] = await sql`SELECT payload FROM trip_events
+      WHERE trip_id = ${trip} AND kind = 'note' ORDER BY occurred_at DESC LIMIT 1`;
+    assert.doesNotMatch(JSON.stringify(event!.payload), /[<>]/, 'the payload is sanitised too');
+  });
+
+  it('keeps a newline from gluing two words together', async () => {
+    const trip = await makeTrip(mineId, await officeToday());
+    await eta(mineToken, trip, { minutesFromNow: 5, reason: 'Route 9\nwill be slow' });
+    const [row] = await sql`SELECT notes FROM trips WHERE id = ${trip}`;
+    assert.match(row!.notes, /Route 9 will be slow/, 'the words stay separate');
+  });
+
+  it("is not silenced by an office note that happens to say the words", async () => {
+    // A substring search of trips.notes suppressed a genuine notice and told
+    // the driver dispatch had been informed. Dispatch had not.
+    const trip = await makeTrip(mineId, await officeToday());
+    await sql`UPDATE trips SET notes = 'Call office if DRIVER RUNNING LATE' WHERE id = ${trip}`;
+    const { body } = await eta(mineToken, trip, { minutesFromNow: 12 });
+    assert.equal(body.data.alreadyFlagged, false, 'the office note is not a driver report');
+    const [row] = await sql`SELECT notes FROM trips WHERE id = ${trip}`;
+    assert.match(row!.notes, /arriving about/, 'the real notice reached the note');
+  });
+
+  it('refuses a flood of notices rather than filling the trip', async () => {
+    const trip = await makeTrip(mineId, await officeToday());
+    const results = [];
+    for (let i = 0; i < 9; i++) results.push(await eta(mineToken, trip, { minutesFromNow: i }));
+    assert.ok(results.some((r) => r.status === 429), 'a ceiling exists');
   });
 
   it('refuses a nonsense offset', async () => {

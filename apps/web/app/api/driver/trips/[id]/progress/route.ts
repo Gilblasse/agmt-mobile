@@ -174,4 +174,4 @@ function stepsBetween(from: string, to: string): string[] {
   });
 }
 
-export const { GET, PUT, PATCH, DELETE } = onlyPost;
+export const { GET, PUT, PATCH, DELETE, OPTIONS } = onlyPost;

@@ -95,3 +95,50 @@ undo left the office's three columns byte-identical. Ownership — another
 driver's trip, an unassigned trip and a nonexistent id all answer identically,
 with no timing oracle. Server-clock stamps. The rate-limit upsert is genuinely
 atomic (45 concurrent requests, 45 hits). No SQL injection anywhere.
+
+## Phase 2, slice 3 — the outbox and Running Late (adversarial review)
+
+Four blockers, eight major findings. **96/96 green with all four blockers
+live** — the third round in a row where a fully passing suite hid the defects,
+and this time against the very improvements the previous retrospective had
+named. Every fix re-verified by re-running the reviewer's own attack.
+
+| # | Finding | Disposition |
+|---|---|---|
+| B1 | The claim lease was stamped once per **batch**, the batch sent serially, and `send()` had no timeout — so the last message of a batch had spent its lease before anything was sent to it, and a second worker re-sent it. Proven on a real clock: one message delivered **3 times**; with a 700ms provider, 4 of 6 sent twice. | **Fixed** — claiming is now a `sending` state with a worker id (migration 0005), every send is bounded by a timeout a quarter of the lease, sends run with bounded concurrency, and a sweeper returns genuinely stale claims. |
+| B2 | `/eta` decided "already flagged?" from a read taken **outside** the transaction. Reproduced every run: concurrency N left N warnings on the dispatcher's note, and told N−1 callers it had not been flagged. | **Fixed** — decided under `FOR UPDATE` inside the transaction. Re-run: 8 simultaneous taps leave **1** warning. |
+| B3 | Dedupe was a substring search of `trips.notes`, which the office also writes. An ordinary note reading "Call office if DRIVER RUNNING LATE" silently swallowed a genuine notice while telling the driver dispatch had been told. | **Fixed** — dedupe reads the event trail, not prose. Re-run with that exact office note: `alreadyFlagged: false`, notice reaches the board. |
+| B4 | The writes recording an outcome were unguarded, so a failed bookkeeping write left a **delivered** message `pending` and aborted the rest of the batch. | **Fixed** — each message's resolution is guarded; an unrecordable outcome is counted as `unresolved` so it is visible rather than silently requeued. |
+| M1 | `version` used `max(updated_at)`, and `now()` is the *transaction start*. A long office transaction committed a row stamped earlier than one already seen, so the token did not move for a committed edit — the phone skips the redraw and the driver keeps the old address. | **Fixed** — the version is a digest of the whole set (moves in either direction), and `touch_updated_at` uses `clock_timestamp()` (migration 0006). |
+| M2 | `/eta` had no rate limit: 300 unbounded rows written in 1.1s. | **Fixed** — 6 per 10 minutes per driver (not per address: a phone changes networks). |
+| M3 | The default sender logged the **sign-in code and the driver's phone number** in clear — and that is the sender production runs until a provider is wired. | **Fixed** — channel and a masked recipient only. Verified: 0 codes in the log. |
+| M4 | `plainWords` was applied to the note and the event value and skipped for `payload.reason`, which `getTripActivity` serves to the office. | **Fixed** — sanitised everywhere it is stored. |
+| M5 | No timeout plus serial sending meant one hanging provider stalled the queue and the scheduler's request. | **Fixed** with B1; a test now proves the message behind a hang still goes. |
+| M6 | The outbox suite marked every other pending notification `'sent'` — recording a delivery that never happened, in the one table that must never claim that. | **Fixed** — rows are deleted, not falsely marked. |
+| M7 | Nothing type-checked a route against `Api`; `getDriverDay` still declared `BoardTrip` while returning raw rows. | **Fixed** — the day payload is bound to the contract type, so drift is a compile error. It caught real drift immediately, and the fix also stopped the phone receiving the Medicaid number, invoice, price and an office email: 18 named fields now, not the whole row. |
+| M8 | The two tests guarding the two blockers could not fail for them: the outbox concurrency test used a sender returning in microseconds, and the ETA dedupe test was sequential. | **Fixed** — a slow sender, a hanging sender, a stale-claim recovery case, and 8 simultaneous ETA taps. 96 → 103. |
+
+### Minor — fixed
+
+405 now carries `Allow` with an explicit `OPTIONS` (the exported verbs were
+advertising every method on a POST-only endpoint), and answers `not-found`
+rather than `validation`; the catch-all is optional so the bare `/api` no
+longer returns HTML; `/eta` distinguishes `day-locked` from "not yet" as the
+tap flow does; `plainWords` substitutes a space instead of deleting, so
+"Route 9\nwill be late" no longer becomes "Route 9will be late"; `reason`
+accepts 120 characters as the live system does; the ETA time carries a date
+when it crosses midnight.
+
+### Also found while fixing
+
+`Trip` declares `vehicleLabel`; the `trips` table has only `vehicle_id`. The
+contract no longer promises it. A flaky outbox ordering test — it asserted on
+every message the sender saw, so another suite's leftover row broke it
+intermittently; it now asserts on its own.
+
+### Minor — recorded, not actioned
+
+`CRON_SECRET` unset vs wrong is still distinguishable (500 vs 401) and the
+length check is an oracle; the trip id is parsed from the URL string rather
+than route params; a deduped second ETA does not move `version`; `plainWords`
+is ASCII-only, which is a real limitation for non-English speakers.

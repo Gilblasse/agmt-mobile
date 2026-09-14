@@ -1,7 +1,11 @@
 import { fail } from '@/lib/api/result';
 
 /**
- * Anything under /api that no route matched.
+ * Anything under /api that no route matched, including the bare segment.
+ *
+ * A required catch-all (`[...unmatched]`) does not match `/api` or `/api/`
+ * itself, so those still returned Next's HTML page while every other unknown
+ * path returned the envelope. Optional (`[[...unmatched]]`) covers both.
  *
  * Without this, Next answers an unknown API path with its HTML 404 page. A
  * phone that always parses the body as JSON throws on that, and the driver

@@ -42,4 +42,4 @@ function sameSecret(offered: string, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-export const { GET, PUT, PATCH, DELETE } = onlyPost;
+export const { GET, PUT, PATCH, DELETE, OPTIONS } = onlyPost;

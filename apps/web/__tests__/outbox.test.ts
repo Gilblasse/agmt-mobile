@@ -43,12 +43,11 @@ const stateOf = async (id: string) =>
   (await sql`SELECT state, attempts, last_error, sent_at, send_after FROM notifications WHERE id = ${id}`)[0]!;
 
 beforeEach(async () => {
-  await sql`DELETE FROM notifications WHERE recipient = '8455550000'`;
   // The drain is global by design — it sends whatever is due, whoever queued
-  // it. Park anything another suite left behind so these tests count only
-  // their own messages.
-  await sql`UPDATE notifications SET state = 'sent', sent_at = now()
-    WHERE state = 'pending' AND recipient <> '8455550000'`;
+  // it — so these tests need the queue to themselves. Earlier suites' rows are
+  // *deleted* rather than marked sent: marking them recorded a delivery that
+  // never happened, which is the one thing this table must never claim.
+  await sql`DELETE FROM notifications`;
   useSender(unconfiguredSender);
 });
 after(async () => {
@@ -132,20 +131,73 @@ describe('draining the outbox', () => {
   });
 
   it('never sends a message twice, even when workers overlap', async () => {
-    // The failure this guards against is a driver told twice — which is
-    // exactly what the old system did, and why nothing sends inline any more.
     for (let i = 0; i < 10; i++) await queue(`message ${i}`);
     const seen = delivers();
 
     await Promise.all([drainOutbox(), drainOutbox(), drainOutbox(), drainOutbox()]);
 
     assert.equal(seen.length, 10, 'ten messages, ten sends');
-    const bodies = seen.map((m) => m.body).sort();
-    assert.equal(new Set(bodies).size, 10, 'no message sent twice');
+    assert.equal(new Set(seen.map((m) => m.body)).size, 10, 'no message sent twice');
+  });
 
-    const [{ c }] = await sql`SELECT count(*)::int c FROM notifications
-      WHERE recipient = '8455550000' AND state = 'sent'`;
-    assert.equal(c, 10);
+  it('never sends a message twice when the provider is SLOW', async () => {
+    // The version of this test above cannot fail for the bug that mattered:
+    // its sender returns in microseconds, so no claim can ever go stale while
+    // a send is still in flight. A provider that takes longer than the claim
+    // is exactly when a second worker used to pick the message up and send it
+    // again — a driver told twice.
+    for (let i = 0; i < 6; i++) await queue(`slow ${i}`);
+    const seen = fakeSender(async () => {
+      await new Promise((r) => setTimeout(r, 300));
+      return { delivered: true };
+    });
+
+    // Overlapping workers, and a sweeper pass in the middle of the sends.
+    const drains = Promise.all([drainOutbox(), drainOutbox()]);
+    await new Promise((r) => setTimeout(r, 150));
+    await drainOutbox();
+    await drains;
+
+    assert.equal(new Set(seen.map((m) => m.body)).size, seen.length, 'no message sent twice');
+    assert.equal(seen.length, 6, 'six messages, six sends');
+  });
+
+  it('gives up on a provider that never answers, instead of hanging the queue', async () => {
+    // Serial sending with no timeout meant one hanging provider held up every
+    // message behind it, and the scheduler's request with it.
+    await queue('hangs');
+    await queue('behind it');
+    let finished = 0;
+    useSender({
+      describe: () => 'hanging sender',
+      async send(message) {
+        if (message.body === 'hangs') await new Promise((r) => setTimeout(r, 60_000).unref?.());
+        finished++;
+        return { delivered: true };
+      },
+    });
+
+    const result = await Promise.race([
+      drainOutbox(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('drain hung')), 40_000).unref()),
+    ]) as Awaited<ReturnType<typeof drainOutbox>>;
+
+    assert.equal(finished, 1, 'the message behind the hang still went');
+    assert.equal(result.delivered, 1);
+    assert.equal(result.failed, 1, 'the hanging one is retried later, not lost');
+  });
+
+  it('returns a message whose worker never came back', async () => {
+    const id = await queue('stranded');
+    // A worker claimed it and died: state 'sending', claim long stale.
+    await sql`UPDATE notifications SET state = 'sending',
+      claimed_at = now() - interval '1 hour', claimed_by = 'a worker that died'
+      WHERE id = ${id}`;
+    const seen = delivers();
+    const result = await drainOutbox();
+    assert.equal(result.recovered, 1, 'the stale claim was returned to the queue');
+    assert.equal(seen.length, 1, 'and then sent');
+    assert.equal((await stateOf(id)).state, 'sent');
   });
 
   it('keeps going when one message throws', async () => {
@@ -171,6 +223,9 @@ describe('draining the outbox', () => {
     await queue('second');
     const seen = delivers();
     await drainOutbox();
-    assert.deepEqual(seen.map((m) => m.body), ['first', 'second']);
+    // Only this test's own messages: asserting on everything the sender saw
+    // made this flake whenever another suite left a row behind.
+    const mine = seen.map((m) => m.body).filter((b) => b === 'first' || b === 'second');
+    assert.deepEqual(mine, ['first', 'second']);
   });
 });

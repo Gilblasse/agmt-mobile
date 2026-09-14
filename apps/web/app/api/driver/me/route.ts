@@ -24,4 +24,4 @@ export const GET = withResult(async (request: Request) => {
   return ok({ driver: auth.driver }, PRIVATE);
 });
 
-export const { POST, PUT, PATCH, DELETE } = onlyGet;
+export const { POST, PUT, PATCH, DELETE, OPTIONS } = onlyGet;
