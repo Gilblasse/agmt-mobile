@@ -69,25 +69,38 @@ describe('requesting a code', () => {
     const { status, body } = await post('/api/driver/sign-in', { name: ACTIVE });
     assert.equal(status, 200);
     assert.equal(body.ok, true);
-    assert.match(JSON.stringify(body), /•••/, 'the driver is told where it went');
-    assert.doesNotMatch(JSON.stringify(body), /\b\d{6}\b/, 'the code itself must not be in the response');
+    // Nothing but `sent: true` — no masked phone number, nothing that differs
+    // from the answer an unknown caller gets. See the enumeration test below.
+    assert.deepEqual(body, { ok: true, data: { sent: true } });
     assert.match(await codeFor(ACTIVE), /^\d{6}$/);
   });
 
   it('stores only a hash of the code', async () => {
     await post('/api/driver/sign-in', { name: ACTIVE });
     const code = await codeFor(ACTIVE);
-    const [row] = await sql`SELECT code_hash FROM driver_sign_in_codes ORDER BY created_at DESC LIMIT 1`;
+    const [row] = await sql`SELECT c.code_hash FROM driver_sign_in_codes c
+      JOIN drivers d ON d.id = c.driver_id WHERE d.name = ${ACTIVE}
+      ORDER BY c.created_at DESC LIMIT 1`;
     assert.notEqual(row!.code_hash, code);
-    assert.match(row!.code_hash, /^[0-9a-f]{64}$/);
+    assert.match(row!.code_hash, /^scrypt\$[0-9a-f]{32}\$[0-9a-f]{64}$/);
   });
 
-  it('answers the same for a name nobody has, so the roster cannot be read', async () => {
+  it('answers byte-for-byte the same for a name nobody has', async () => {
     const known = await post('/api/driver/sign-in', { name: ACTIVE });
     const unknown = await post('/api/driver/sign-in', { name: 'Nobody At All' });
     assert.equal(unknown.status, known.status);
-    assert.equal(unknown.body.ok, true);
-    assert.equal(await sql`SELECT count(*)::int c FROM driver_sign_in_codes`.then((r) => typeof r[0]!.c), 'number');
+    // The whole body, not just `ok` — an earlier version returned the masked
+    // phone number here, handing out the last four digits to any caller.
+    assert.deepEqual(unknown.body, known.body);
+    assert.doesNotMatch(JSON.stringify(known.body), /\d{4}|•/);
+  });
+
+  it('answers the same for a driver who has no phone or email on file', async () => {
+    await sql`UPDATE drivers SET phone = NULL, email = NULL WHERE name = ${INACTIVE}`;
+    const reachable = await post('/api/driver/sign-in', { name: ACTIVE });
+    const unreachable = await post('/api/driver/sign-in', { name: INACTIVE });
+    assert.equal(unreachable.status, reachable.status);
+    assert.deepEqual(unreachable.body, reachable.body);
   });
 
   it('does not send a second code inside the cooldown', async () => {
@@ -116,7 +129,9 @@ describe('verifying a code', () => {
 
   it('stores only a hash of the token', async () => {
     const token = await signInAs(ACTIVE);
-    const [row] = await sql`SELECT token_hash FROM driver_sessions ORDER BY created_at DESC LIMIT 1`;
+    const [row] = await sql`SELECT s.token_hash FROM driver_sessions s
+      JOIN drivers d ON d.id = s.driver_id WHERE d.name = ${ACTIVE}
+      ORDER BY s.created_at DESC LIMIT 1`;
     assert.notEqual(row!.token_hash, token);
     assert.match(row!.token_hash, /^[0-9a-f]{64}$/);
   });
@@ -156,7 +171,8 @@ describe('verifying a code', () => {
   it('refuses an expired code', async () => {
     await post('/api/driver/sign-in', { name: ACTIVE });
     const code = await codeFor(ACTIVE);
-    await sql`UPDATE driver_sign_in_codes SET expires_at = now() - interval '1 minute'`;
+    await sql`UPDATE driver_sign_in_codes SET expires_at = now() - interval '1 minute'
+      WHERE driver_id IN (SELECT id FROM drivers WHERE name = ${ACTIVE})`;
     assert.equal((await post('/api/driver/verify', { name: ACTIVE, code })).status, 401);
   });
 });
@@ -191,20 +207,128 @@ describe('the roster gate', () => {
   it('refuses a revoked or expired session', async () => {
     const token = await signInAs(ACTIVE);
     const auth = { authorization: `Bearer ${token}` };
-    await sql`UPDATE driver_sessions SET revoked_at = now()`;
+    const mine = sql`driver_id IN (SELECT id FROM drivers WHERE name = ${ACTIVE})`;
+    await sql`UPDATE driver_sessions SET revoked_at = now() WHERE ${mine}`;
     assert.equal((await call('/api/driver/me', { headers: auth })).status, 401);
 
-    await sql`UPDATE driver_sessions SET revoked_at = NULL, expires_at = now() - interval '1 day'`;
+    await sql`UPDATE driver_sessions SET revoked_at = NULL, expires_at = now() - interval '1 day' WHERE ${mine}`;
     assert.equal((await call('/api/driver/me', { headers: auth })).status, 401);
   });
 
-  it('keeps at most eight trusted phones, revoking the oldest', async () => {
+  it('keeps at most eight trusted phones, and revokes the OLDEST', async () => {
+    const tokens: string[] = [];
     for (let i = 0; i < 9; i++) {
-      await sql`DELETE FROM driver_sign_in_codes`;
-      await signInAs(ACTIVE);
+      await sql`DELETE FROM driver_sign_in_codes WHERE driver_id IN (SELECT id FROM drivers WHERE name = ${ACTIVE})`;
+      tokens.push(await signInAs(ACTIVE));
     }
     const [{ c }] = await sql`SELECT count(*)::int c FROM driver_sessions ds
       JOIN drivers d ON d.id = ds.driver_id WHERE d.name = ${ACTIVE} AND ds.revoked_at IS NULL`;
     assert.equal(c, 8);
+
+    // Counting to eight would still pass if the NEWEST were revoked. Check the
+    // survivors by token: the first phone is out, the last is still trusted.
+    const first = await call('/api/driver/me', { headers: { authorization: `Bearer ${tokens[0]}` } });
+    const last = await call('/api/driver/me', { headers: { authorization: `Bearer ${tokens[8]}` } });
+    assert.equal(first.status, 401, 'the oldest phone should have been revoked');
+    assert.equal(last.status, 200, 'the newest phone must still work');
+  });
+});
+
+/**
+ * These are the cases the first version of this suite missed. Every check here
+ * passed against an implementation that was, in fact, broken — because each
+ * one fired its requests one after another, and the defects only appear when
+ * requests arrive together.
+ */
+describe('under concurrent requests', () => {
+  it('counts every simultaneous wrong guess against the attempt limit', async () => {
+    await post('/api/driver/sign-in', { name: ACTIVE });
+    const real = await codeFor(ACTIVE);
+    const wrong = String((Number(real) + 1) % 1_000_000).padStart(6, '0');
+
+    // Forty at once. A read-modify-write on the attempts column loses updates
+    // here and charges one or two, leaving the limit effectively unbounded.
+    await Promise.all(
+      Array.from({ length: 40 }, () => post('/api/driver/verify', { name: ACTIVE, code: wrong })),
+    );
+
+    const { status } = await post('/api/driver/verify', { name: ACTIVE, code: real });
+    assert.equal(status, 401, 'the code must be dead after forty simultaneous wrong guesses');
+  });
+
+  it('issues only one code when sign-in requests arrive together', async () => {
+    await Promise.all(
+      Array.from({ length: 12 }, () => post('/api/driver/sign-in', { name: ACTIVE })),
+    );
+    const [{ c }] = await sql`SELECT count(*)::int c FROM notifications n
+      JOIN drivers d ON d.id = n.driver_id WHERE d.name = ${ACTIVE}`;
+    assert.equal(c, 1, 'twelve simultaneous requests must not send twelve text messages');
+  });
+
+  it('mints exactly one session when a code is verified twice at once', async () => {
+    await post('/api/driver/sign-in', { name: ACTIVE });
+    const code = await codeFor(ACTIVE);
+
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => post('/api/driver/verify', { name: ACTIVE, code })),
+    );
+
+    assert.equal(results.filter((r) => r.status === 200).length, 1, 'exactly one should succeed');
+    // The losers must get the envelope, not an empty 500 the phone cannot read.
+    for (const loser of results.filter((r) => r.status !== 200)) {
+      assert.equal(loser.status, 401);
+      assert.equal(loser.body.ok, false);
+      assert.ok(typeof loser.body.message === 'string' && loser.body.message.length > 0);
+    }
+  });
+
+  it('never leaves a live code unverifiable', async () => {
+    // Racing sign-ins previously left several live codes; verify then checked
+    // one arbitrary row, so the code actually sent to the driver was refused.
+    await Promise.all(
+      Array.from({ length: 6 }, () => post('/api/driver/sign-in', { name: ACTIVE })),
+    );
+    const code = await codeFor(ACTIVE);
+    const { status } = await post('/api/driver/verify', { name: ACTIVE, code });
+    assert.equal(status, 200, 'the code the driver was actually sent must work');
+  });
+
+  it('burning a code does not clear the resend cooldown', async () => {
+    await post('/api/driver/sign-in', { name: ACTIVE });
+    const real = await codeFor(ACTIVE);
+    const wrong = String((Number(real) + 1) % 1_000_000).padStart(6, '0');
+    for (let i = 0; i < 5; i++) await post('/api/driver/verify', { name: ACTIVE, code: wrong });
+
+    await post('/api/driver/sign-in', { name: ACTIVE });
+    const [{ c }] = await sql`SELECT count(*)::int c FROM notifications n
+      JOIN drivers d ON d.id = n.driver_id WHERE d.name = ${ACTIVE}`;
+    assert.equal(c, 1, 'running out of attempts must not let a fresh code be pulled straight away');
+  });
+});
+
+describe('identifying yourself by email or phone', () => {
+  it('accepts an email address', async () => {
+    await post('/api/driver/sign-in', { email: 'active@example.com' });
+    const { status } = await post('/api/driver/verify', {
+      email: 'active@example.com',
+      code: await codeFor(ACTIVE),
+    });
+    assert.equal(status, 200);
+  });
+
+  it('accepts a phone number however it is punctuated', async () => {
+    await post('/api/driver/sign-in', { phone: '(845) 555-0101' });
+    const { status } = await post('/api/driver/verify', {
+      phone: '845-555-0101',
+      code: await codeFor(ACTIVE),
+    });
+    assert.equal(status, 200);
+  });
+
+  it('does not let one driver’s code be spent by naming another', async () => {
+    await post('/api/driver/sign-in', { name: ACTIVE });
+    const code = await codeFor(ACTIVE);
+    const { status } = await post('/api/driver/verify', { email: 'inactive@example.com', code });
+    assert.equal(status, 401);
   });
 });

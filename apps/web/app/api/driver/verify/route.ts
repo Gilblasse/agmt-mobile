@@ -2,8 +2,8 @@ import { and, eq, gt, isNull, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/lib/db';
 import { driverSessions, driverSignInCodes, drivers } from '@/lib/db/schema';
-import { fail, ok, readJson, UNREADABLE } from '@/lib/api/result';
-import { hashSecret, newSessionToken, secretMatches } from '@/lib/auth/tokens';
+import { fail, ok, PRIVATE, readJson, UNREADABLE, withResult } from '@/lib/api/result';
+import { codeMatches, hashToken, newSessionToken } from '@/lib/auth/tokens';
 import { revokeSessionsBeyondLimit, SESSION_TTL_DAYS } from '@/lib/auth/driver';
 
 /**
@@ -12,19 +12,13 @@ import { revokeSessionsBeyondLimit, SESSION_TTL_DAYS } from '@/lib/auth/driver';
  * DELIBERATE DEVIATION FROM THE CONTRACT. `contract.ts` types this as
  * `driverVerify({ code })` — the code alone, with no indication of who is
  * presenting it. Implemented that way, every code in flight shares one
- * six-digit space: a caller guessing 000000 is guessing against *every*
- * driver signing in at that moment, and the five-attempt limit protects an
- * individual code while doing nothing about the space as a whole.
+ * six-digit space. This endpoint asks who you are as well, which is what the
+ * live system does (`driverVerifyCode(name, code)`, docs/02 §1.3). Recorded in
+ * .agile/decisions.md.
  *
- * So this endpoint asks who you are as well. That is also what the live
- * system does (`driverVerifyCode(name, code)` — see docs/02-driver-app.md
- * §1.3), which has been in production for years. The contract is an
- * unimplemented sketch and CLAUDE.md says to expect it to change; this change
- * is recorded in .agile/decisions.md.
- *
- * A wrong code is counted against that code, and the fifth wrong attempt
- * burns it — the driver asks for a new one rather than being told how many
- * guesses remain.
+ * There is at most one live code per driver — the database enforces it — so
+ * there is exactly one candidate to check, and the driver's genuine code can
+ * never be refused because a stale row was consulted instead.
  */
 
 const MAX_ATTEMPTS = 5;
@@ -43,7 +37,7 @@ const Verify = z
 /** One message for every way a code can be refused, so none of them is a probe. */
 const REFUSED = 'That code is wrong or has expired. Ask for a new one.';
 
-export async function POST(request: Request) {
+export const POST = withResult(async (request: Request) => {
   const body = await readJson(request);
   if (body === UNREADABLE) return fail('validation', 'The request body was not readable JSON.');
 
@@ -63,6 +57,7 @@ export async function POST(request: Request) {
     .select()
     .from(drivers)
     .where(and(eq(drivers.active, true), or(...matches)))
+    .orderBy(drivers.createdAt, drivers.id)
     .limit(1);
   if (!driver) return fail('not-authorised', REFUSED);
 
@@ -79,41 +74,46 @@ export async function POST(request: Request) {
     .limit(1);
   if (!candidate) return fail('not-authorised', REFUSED);
 
-  if (!secretMatches(code, candidate.codeHash)) {
-    const attempts = candidate.attempts + 1;
-    await db
-      .update(driverSignInCodes)
-      .set({
-        attempts,
-        // Out of attempts: burn it rather than leave it open to more guessing.
-        consumedAt: attempts >= MAX_ATTEMPTS ? new Date().toISOString() : null,
-      })
-      .where(eq(driverSignInCodes.id, candidate.id));
+  if (!codeMatches(code, candidate.codeHash)) {
+    // One statement, so the count is the database's and not a stale read. The
+    // previous read-modify-write lost updates under load: forty simultaneous
+    // guesses cost a single attempt, which left the limit meaningless.
+    await db.execute(sql`
+      UPDATE driver_sign_in_codes
+      SET attempts = attempts + 1,
+          consumed_at = CASE WHEN attempts + 1 >= ${MAX_ATTEMPTS} THEN now() ELSE NULL END
+      WHERE id = ${candidate.id} AND consumed_at IS NULL
+    `);
     return fail('not-authorised', REFUSED);
   }
 
   const token = newSessionToken();
   const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 86_400_000).toISOString();
 
-  await db.transaction(async (tx) => {
-    // Single use. Consuming it in the same transaction that mints the session
-    // means a code replayed against a slow network cannot yield two sessions.
+  // Consuming the code and minting the session in one transaction means a code
+  // replayed over a flaky connection cannot yield two sessions. The loser of
+  // that race is told the code is spent rather than shown an error it cannot
+  // act on.
+  const minted = await db.transaction(async (tx) => {
     const consumed = await tx
       .update(driverSignInCodes)
       .set({ consumedAt: new Date().toISOString() })
       .where(and(eq(driverSignInCodes.id, candidate.id), isNull(driverSignInCodes.consumedAt)))
       .returning({ id: driverSignInCodes.id });
-    if (consumed.length === 0) throw new Error('code already consumed');
+    if (consumed.length === 0) return false;
 
     await tx.insert(driverSessions).values({
       driverId: driver.id,
-      tokenHash: hashSecret(token),
+      tokenHash: hashToken(token),
       userAgent: request.headers.get('user-agent')?.slice(0, 500) ?? null,
       expiresAt,
     });
+    return true;
   });
+
+  if (!minted) return fail('not-authorised', REFUSED);
 
   await revokeSessionsBeyondLimit(driver.id);
 
-  return ok({ token, driver });
-}
+  return ok({ token, driver }, PRIVATE);
+});

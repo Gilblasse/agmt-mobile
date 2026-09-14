@@ -65,9 +65,17 @@ jobs:
       # Driver sign-in end to end against the real database and a real server.
       - name: Test the API
         run: |
-          bun run --filter '@ag/web' start &
-          for i in $(seq 1 60); do curl -sf -o /dev/null http://localhost:3000/ && break; sleep 1; done
-          BASE_URL=http://localhost:3000 bun run --filter '@ag/web' test
+          bun run --filter '@ag/web' start > /tmp/server.log 2>&1 &
+          ready=""
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://localhost:3000/; then ready=yes; break; fi
+            sleep 1
+          done
+          # Without this the loop's last command is `sleep`, which exits 0 even
+          # after sixty failed probes, and the real failure then shows up as a
+          # confusing pile of connection errors from the tests.
+          if [ -z "$ready" ]; then echo "server never became ready:"; cat /tmp/server.log; exit 1; fi
+          BASE_URL=http://localhost:3000 bun run --filter '@ag/web' test || { cat /tmp/server.log; exit 1; }
 
       # Proves the shared rules still bundle into a phone build.
       - name: Export mobile bundles

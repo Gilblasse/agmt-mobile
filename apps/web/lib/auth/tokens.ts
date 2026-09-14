@@ -1,51 +1,59 @@
-import { createHash, randomInt, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomInt, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
 /**
  * Secrets are stored hashed, so a copy of the database is not a set of working
- * credentials.
+ * credentials. The two kinds of secret here get different treatment, because
+ * they are protected by different things.
  *
- * Both a sign-in code and a session token are hashed with plain SHA-256 rather
- * than a slow KDF, for different reasons:
+ * A **session token** is 160 bits of randomness. There is nothing to guess, so
+ * a slow hash buys nothing — and it is checked on every request, where the
+ * cost would be real. SHA-256.
  *
- * - A session token is 160 bits of randomness. There is nothing to guess, so a
- *   slow hash buys nothing — and this one is checked on *every* request, where
- *   the cost would be real.
- * - A sign-in code is only six digits, so a slow hash would not save it either:
- *   a million candidates is trivial to sweep whatever the cost per guess. What
- *   protects the code is that it dies after ten minutes, after five wrong
- *   attempts, or on first use — whichever comes first.
- *
- * If codes ever become long-lived, this reasoning stops holding and they need
- * a real KDF.
+ * A **sign-in code** is six digits: a million candidates. That is exactly the
+ * regime where a slow hash earns its keep. A code lives for ten minutes, and
+ * any per-guess cost above roughly a millisecond puts a full offline sweep
+ * beyond that window, where SHA-256 would take seconds. So codes get scrypt.
+ * It runs once per verification attempt, which is rare.
  */
 
-export function hashSecret(secret: string): string {
-  return createHash('sha256').update(secret, 'utf8').digest('hex');
+const SCRYPT_KEYLEN = 32;
+const SCRYPT_COST = 2 ** 14; // ~50ms per guess — far past a code's ten minutes.
+
+export function hashToken(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
 }
 
-/** Compares two hex digests without leaking where they first differ. */
-export function secretMatches(secret: string, expectedHash: string): boolean {
-  const actual = Buffer.from(hashSecret(secret), 'hex');
-  let expected: Buffer;
-  try {
-    expected = Buffer.from(expectedHash, 'hex');
-  } catch {
-    return false;
-  }
-  if (actual.length !== expected.length) return false;
-  return timingSafeEqual(actual, expected);
+/** `scrypt$<salt hex>$<derived hex>` — the salt travels with the digest. */
+export function hashCode(code: string): string {
+  const salt = randomBytes(16);
+  const derived = scryptSync(code, salt, SCRYPT_KEYLEN, { N: SCRYPT_COST });
+  return `scrypt$${salt.toString('hex')}$${derived.toString('hex')}`;
 }
 
-/**
- * A six-digit code. The old system bumped a leading zero to a 1 because its
- * display code dropped it; we keep the full range and format it as a string,
- * so `007193` stays `007193`.
- */
+function equalHex(a: string, b: string): boolean {
+  // Buffer.from(..., 'hex') truncates silently at the first invalid pair, so a
+  // malformed stored hash would otherwise compare equal to a valid prefix.
+  if (!/^[0-9a-f]+$/i.test(a) || !/^[0-9a-f]+$/i.test(b) || a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
+}
+
+export function tokenMatches(token: string, storedHash: string): boolean {
+  return equalHex(hashToken(token), storedHash);
+}
+
+export function codeMatches(code: string, storedHash: string): boolean {
+  const [scheme, salt, derived] = storedHash.split('$');
+  if (scheme !== 'scrypt' || !salt || !derived || !/^[0-9a-f]+$/i.test(salt)) return false;
+  const actual = scryptSync(code, Buffer.from(salt, 'hex'), SCRYPT_KEYLEN, { N: SCRYPT_COST });
+  return equalHex(actual.toString('hex'), derived);
+}
+
+/** Six digits, full range: `007193` stays `007193`. */
 export function newSignInCode(): string {
   return String(randomInt(0, 1_000_000)).padStart(6, '0');
 }
 
-/** 160 bits, base32-ish: unambiguous to read aloud down a bad phone line. */
+/** 160 bits, URL-safe. Never shown to a person, so readability does not matter. */
 export function newSessionToken(): string {
   return randomBytes(20).toString('base64url');
 }

@@ -1,12 +1,14 @@
 import { and, eq, gt, isNull, sql } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { driverSessions, drivers } from '@/lib/db/schema';
-import { hashSecret } from './tokens';
+import { hashToken } from './tokens';
 
 /** How long a trusted phone stays trusted before it needs a fresh code. */
 export const SESSION_TTL_DAYS = 90;
 /** Oldest sessions are revoked past this, so a driver churning phones does not accumulate keys. */
 export const MAX_SESSIONS_PER_DRIVER = 8;
+/** How stale `last_used_at` may get before it is worth another write. */
+const LAST_USED_RESOLUTION_MS = 5 * 60_000;
 
 export type Driver = typeof drivers.$inferSelect;
 
@@ -40,7 +42,7 @@ export async function authenticateDriver(request: Request): Promise<DriverAuth> 
     .innerJoin(drivers, eq(drivers.id, driverSessions.driverId))
     .where(
       and(
-        eq(driverSessions.tokenHash, hashSecret(token)),
+        eq(driverSessions.tokenHash, hashToken(token)),
         isNull(driverSessions.revokedAt),
         gt(driverSessions.expiresAt, now),
       ),
@@ -51,10 +53,19 @@ export async function authenticateDriver(request: Request): Promise<DriverAuth> 
   // Still a session, but no longer a driver we let in.
   if (!row.driver.active) return { ok: false, reason: 'off-roster' };
 
-  await db
-    .update(driverSessions)
-    .set({ lastUsedAt: now })
-    .where(eq(driverSessions.id, row.session.id));
+  // `last_used_at` is for the office to see which phones are still in use, so
+  // minute-accuracy is plenty. The driver app polls every few seconds; writing
+  // on every request put a steady stream of updates — and dead tuples — on a
+  // table carrying a unique index, for no one's benefit. Not awaited: a slow
+  // write should never hold up a driver's request.
+  const lastUsed = row.session.lastUsedAt ? new Date(row.session.lastUsedAt).getTime() : 0;
+  if (Date.now() - lastUsed > LAST_USED_RESOLUTION_MS) {
+    void db
+      .update(driverSessions)
+      .set({ lastUsedAt: now })
+      .where(eq(driverSessions.id, row.session.id))
+      .catch((error) => console.error('could not record session use', error));
+  }
 
   return { ok: true, driver: row.driver, sessionId: row.session.id };
 }
@@ -70,7 +81,9 @@ export async function revokeSessionsBeyondLimit(driverId: string): Promise<numbe
     WHERE id IN (
       SELECT id FROM driver_sessions
       WHERE driver_id = ${driverId} AND revoked_at IS NULL
-      ORDER BY created_at DESC
+      -- id breaks ties so two sessions created in the same instant still have
+      -- a defined order, and the same one is always the survivor.
+      ORDER BY created_at DESC, id DESC
       OFFSET ${MAX_SESSIONS_PER_DRIVER}
     )
     RETURNING id

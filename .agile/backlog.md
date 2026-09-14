@@ -17,6 +17,15 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 
 ## Next
 
+- **Rate limiting on the unauthenticated endpoints** [must, before any real
+  driver uses this] — `sign-in` and `verify` need a per-caller limit, not just
+  the per-driver cooldown and per-code attempt cap that exist now. Knowing only
+  a driver's name (or phone, in any punctuation), a stranger can burn each code
+  as it is issued and keep that driver locked out; the per-driver controls
+  bound the rate but cannot tell the driver and the attacker apart.
+  *Acceptance:* a caller exceeding the limit gets `busy`; a test proves a third
+  party cannot indefinitely deny sign-in to a driver they can name.
+
 - **The rest of the API** (Phase 2) — remaining `contract.ts` endpoints behind
   the same envelope. Next most useful: `getDriverDay`, then `setDriverProgress`
   with its idempotency key, since those unblock the driver app.

@@ -1,34 +1,48 @@
-# Independent review — Phase 1 scaffold
+# Independent reviews
 
-One independent pass, against the six acceptance criteria. No blockers.
-Dispositions below; everything marked *fixed* was re-verified, not assumed.
+## Phase 2, slice 1 — driver sign-in (security review)
 
-## Major
+Adversarial review against a running server. Two blockers and six major
+findings, all reproduced live. Every fix below was re-verified by re-running
+the reviewer's own attack, not by trusting the test suite.
 
 | # | Finding | Disposition |
 |---|---|---|
-| 1 | `export:all` ran `expo export` twice; the second run deletes `dist/` first, so only Android survived. Acceptance criterion 2 was not actually met, and `verification.md` claimed both platforms. | **Fixed** — one invocation, `--platform ios --platform android`. Re-run: `metadata.json` now lists both, both `.hbc` files present. |
-| 2 | `options.manual` as a string (or `dropped` as a number) threw out of the quote handler, returning a 500 outside the `Result` envelope. | **Fixed** — inputs coerced, handler wrapped, `internal` reason used for genuine failures. Both payloads now return a proper envelope. |
-| 3 | `miles: "twelve"` produced `incomplete: false` with the mileage line silently absent — a quote reporting itself safe to invoice while missing its distance. | **Fixed** — non-numeric, non-finite and negative mileage rejected with `validation`. This inverted non-negotiable #4 and was the most serious finding. |
-| 4 | `Result<T>` / `FailureReason` were not reachable from the apps, so nothing compile-checked the envelope. | **Fixed** — `./api` added to the package `exports`; the route is now typed against `Result<QuoteData>`. |
-| 5 | Build-before-apps ordering was documented but unenforced; `bun install && bun run typecheck` failed on a fresh clone with a misleading "cannot find module". | **Fixed** — `prepare` on the rules package. Verified by deleting `dist/` and reinstalling. |
-| 6 | The repo is public and `packages/rules/legacy/` carries live production identifiers: the driver-app `/exec` deployment URL, seven spreadsheet IDs, and company email addresses. | **Escalated to the owner.** Not a code defect — a decision, and irreversible once pushed. Blocking the first push. |
+| B1 | `sign-in` was an enumeration oracle: a known driver got back a masked phone (`•••-•••-0001`), an unknown name got a different body, and a driver with no contact details got a 400. It also leaked the last four phone digits to any caller. | **Fixed** — all four paths return byte-identical `{sent:true}`; the unreachable case is logged for the office; the cooldown query runs either way so timing does not distinguish. Verified. |
+| B2a | The attempt counter was a read-modify-write outside any transaction. 40 concurrent guesses cost 1–2 attempts, making the 5-attempt limit meaningless (~57 guesses/sec measured). | **Fixed** — one `UPDATE ... SET attempts = attempts + 1` that also burns at the limit. 40 concurrent guesses now land `attempts=5, burned=true`. |
+| B2b | Burning a code set `consumed_at`, which the cooldown query required to be NULL — so running out of attempts cleared the cooldown and a fresh code issued instantly. | **Fixed** — cooldown measured from the most recent code of any kind. Verified: re-request straight after a burn queues nothing. |
+| M3 | `throw new Error('code already consumed')` and `dedupe_key` collisions escaped as empty non-envelope 500s. | **Fixed** — `withResult()` wraps every handler; the losing racer gets a 401 envelope. 8 concurrent verifies: 1×200, 7×401, all JSON. |
+| M4 | The 60s cooldown was check-then-act: 12 concurrent sign-ins sent 6 messages in one second. | **Fixed** — `SELECT ... FOR UPDATE` on the driver row plus a partial unique index (migration 0002). Now exactly 1. The index alone was insufficient; the lock is what serialises. |
+| M5 | Verify read one arbitrary live code with no `ORDER BY`, so the driver's genuine code could be refused while a stale row was checked. | **Fixed** — at most one live code per driver is now a database rule, so there is exactly one candidate. |
+| M6 | Knowing only a driver's name, a stranger could burn every code and lock them out indefinitely. | **Partly fixed, partly deferred.** B2a/B2b bound the rate, but per-caller limiting is what actually separates the driver from the attacker. Raised to the top of the backlog as a `[must]` before any real driver uses this. |
+| M7 | Test SQL had no `WHERE` clauses — running the suite logged out an unrelated driver. | **Fixed** — every statement scoped to the fixtures. |
+| M8 | All 17 tests passed against the broken implementation: the enumeration test compared only status and `ok`, the cooldown and attempt-limit tests fired sequentially, the device-cap test counted to 8 without checking *which* 8, and one assertion was a tautology. | **Fixed** — bodies compared whole, survivors checked by token, and 9 new cases covering concurrency and the email/phone identifier paths. 17 → 26. |
 
-## Minor
+### Minor — fixed
 
-Fixed: verification wording corrected (1, 2); Bun pinned to 1.3.11 and
-`actions/setup-node@v4` added (3, 4); root `typecheck` now covers `@ag/rules`
-(5); `db:up`/`db:smoke` take `-d "${PGDATABASE:-agnext}"` (6); `{"trip": []}`
-rejected (7); app renamed off the `create-expo-app` default with real bundle
-identifiers (8); `typescript` declared on the rules package (9).
+`secretMatches` accepted a valid prefix of a malformed hash, because
+`Buffer.from(…,'hex')` truncates silently (now validated with a regex);
+`last_used_at` was written on every request (now throttled to 5 minutes and not
+awaited); `/me` had no `Cache-Control: no-store` (added, with `Vary`);
+`DATABASE_URL` was claimed to fail at startup but did not (now imported from
+`instrumentation.ts`); `revokeSessionsBeyondLimit` had no tiebreaker (added
+`id`); the citext patch could silently no-op (now asserts the expected column
+count and exits non-zero); the CI readiness loop ended in `sleep` so it exited
+0 after 60 failed probes (now explicit, and dumps the server log).
 
-## Optional — recorded, not actioned
+### Optional — actioned anyway
 
-- `verify` compiles the package three times and CI four. Correct but wasteful.
-- CI triggers on pushes to `main` only; feature branches wait for a PR.
-- `apps/mobile/` keeps `CLAUDE.md`, `AGENTS.md` and `.claude/settings.json` from
-  the Expo template. The `AGENTS.md` pointer to versioned Expo docs is useful;
-  the committed `enabledPlugins` is one developer's preference. (The template's
-  `LICENSE`, which asserted Expo's copyright over this app, was removed.)
-- No `main`/`types` fallback beside `exports` — fine for both current
-  consumers, a trap for classic node10 resolution later.
+The reviewer showed the recorded argument for hashing codes with SHA-256 was
+mathematically wrong: a ten-minute expiry is exactly what makes a slow KDF
+worth it. Codes are now scrypt; tokens stay SHA-256. `decisions.md` records the
+correction rather than quietly replacing it.
+
+### Optional — recorded, not actioned
+
+`or(...)` identifier resolution cannot mint another driver's session — the code
+row is always looked up against the resolved driver — but supplying identifiers
+belonging to different drivers resolves to one of them arbitrarily. A
+deterministic `ORDER BY` was added; requiring all identifiers to agree is
+still open. `authenticateDriver` answers *who*, not *what they may touch*: the
+first trip endpoint must extend it with per-resource ownership, per docs/02
+§1.7, which is where the old system let one driver complete another's trip.

@@ -52,8 +52,11 @@ priced breakdown, and a total of $86.00.
 
 ## Driver sign-in (this iteration)
 
-17 integration tests against a real PostgreSQL and a running production
-server — **17 pass, 0 fail**. Codes are read back out of the `notifications`
+26 integration tests against a real PostgreSQL and a running production
+server — **26 pass, 0 fail**. An independent security review found two
+blockers and six major issues in the first version; all are fixed, and the
+attacks the reviewer used were re-run against the fix rather than trusted to
+the tests. Dispositions in `review-findings.md`. Codes are read back out of the `notifications`
 outbox, exactly as a delivery worker would; they never appear in a response.
 
 Requesting a code: queued to the outbox and absent from the reply; stored only
@@ -72,6 +75,21 @@ existing session off on the very next request, with no separate revoke step**;
 missing, malformed and invented tokens are refused; revoked and expired
 sessions are refused; a ninth sign-in revokes the oldest, holding at eight
 trusted phones.
+
+Under concurrency — the cases the first suite missed entirely, because every
+check fired sequentially and the defects only appear when requests arrive
+together:
+
+- 40 simultaneous wrong guesses land `attempts=5, burned=true`, and the real
+  code is then refused. Previously they cost one or two attempts.
+- 12 simultaneous sign-ins queue exactly **1** message. Previously 6.
+- 8 simultaneous verifies of the correct code yield exactly one 200 and seven
+  `401 application/json` envelopes. Previously 7 empty non-envelope 500s.
+- Burning a code does not clear the resend cooldown.
+- After racing sign-ins, the code the driver actually received still verifies.
+
+Enumeration: known, unknown, inactive, and on-the-roster-but-unreachable all
+return byte-identical `{"ok":true,"data":{"sent":true}}`.
 
 Demonstrated end to end by hand as well: request → outbox message → verify →
 authorised `/api/driver/me` → driver marked inactive → same token refused with

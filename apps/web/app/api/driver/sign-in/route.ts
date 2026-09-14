@@ -1,23 +1,25 @@
-import { and, eq, gt, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/lib/db';
 import { driverSignInCodes, drivers, notifications } from '@/lib/db/schema';
-import { fail, ok, readJson, UNREADABLE } from '@/lib/api/result';
-import { hashSecret, newSignInCode } from '@/lib/auth/tokens';
+import { fail, ok, readJson, UNREADABLE, withResult } from '@/lib/api/result';
+import { hashCode, newSignInCode } from '@/lib/auth/tokens';
 
 /**
  * POST /api/driver/sign-in — `driverSignIn` in the API contract.
  *
- * A driver identifies themselves and we send a six-digit code to the contact
- * details already on the roster. The code never comes back in the response;
- * it goes to the `notifications` outbox, which is the single path everything
- * the office sends takes. Nothing is delivered inline — see
- * docs/06-external-services.md, which replaces the old carrier-email trick
- * with a real provider.
+ * A driver identifies themselves and a six-digit code goes to the contact
+ * details already on the roster. The code is never in the response; it goes to
+ * the `notifications` outbox, the single path everything the office sends
+ * takes (docs/06-external-services.md).
  *
- * The reply is deliberately the same whether or not the name matches anyone.
- * Telling an unknown caller "no such driver" would turn this endpoint into a
- * way to read the roster, and the roster is a list of real people.
+ * **Every path returns exactly `{ sent: true }`.** Not "sent to •••-•••-0001",
+ * not a different answer for a name nobody has, not an error for a driver with
+ * no phone number on file. Any of those turns this endpoint — which needs no
+ * authentication at all — into a way to ask "is this person one of your
+ * drivers?", and the answer is a list of real people. An earlier version
+ * returned the masked phone number, which also handed out the last four digits
+ * to anyone who asked.
  */
 
 const CODE_TTL_MINUTES = 10;
@@ -33,17 +35,10 @@ const SignIn = z
     message: 'Give a name, an email address or a phone number.',
   });
 
-/** What the driver is told, so they know which phone or inbox to check. */
-function mask(contact: string, channel: 'sms' | 'email'): string {
-  if (channel === 'email') {
-    const [user = '', domain = ''] = contact.split('@');
-    return `${user.slice(0, 3)}•••@${domain}`;
-  }
-  const digits = contact.replace(/\D/g, '');
-  return `•••-•••-${digits.slice(-4)}`;
-}
+/** The same answer for everyone, whatever happened behind it. */
+const SENT = { sent: true } as const;
 
-export async function POST(request: Request) {
+export const POST = withResult(async (request: Request) => {
   const body = await readJson(request);
   if (body === UNREADABLE) return fail('validation', 'The request body was not readable JSON.');
 
@@ -63,50 +58,65 @@ export async function POST(request: Request) {
     .select()
     .from(drivers)
     .where(and(eq(drivers.active, true), or(...matches)))
+    // Without an order this resolves by physical row order, which shifts as
+    // rows are updated. Two identifiers naming different drivers must at least
+    // pick the same one every time.
+    .orderBy(drivers.createdAt, drivers.id)
     .limit(1);
 
-  // Nobody matched, or they are off the roster. Same answer either way.
-  if (!driver) return ok({ sent: true });
-
-  // One code in flight at a time. Asking again inside the cooldown is not an
-  // error the driver has to act on — it just does not send a second message.
-  const [pending] = await db
-    .select({ createdAt: driverSignInCodes.createdAt })
-    .from(driverSignInCodes)
-    .where(
-      and(
-        eq(driverSignInCodes.driverId, driver.id),
-        isNull(driverSignInCodes.consumedAt),
-        gt(driverSignInCodes.createdAt, new Date(Date.now() - RESEND_COOLDOWN_SECONDS * 1000).toISOString()),
-      ),
-    )
-    .limit(1);
-  if (pending) return ok({ sent: true });
-
-  const channel = driver.phone ? 'sms' : driver.email ? 'email' : null;
-  const recipient = driver.phone ?? driver.email;
-  if (!channel || !recipient) {
-    // On the roster but unreachable. The office has to fix the record; saying
-    // "sent" would leave the driver waiting for a message that cannot arrive.
-    return fail('validation', 'There is no phone number or email address on file for you. Ask the office to add one.');
+  // Everything from here happens under a lock on the driver's row, so the
+  // cooldown check and the insert cannot interleave with another request.
+  // Checking first and inserting afterwards was not enough: twelve requests
+  // arriving together all read "no recent code" before any of them had
+  // inserted one, and the driver got a burst of text messages.
+  //
+  // The work runs whether or not a driver matched, so the time taken does not
+  // reveal the answer either.
+  if (!driver) {
+    await db.execute(sql`SELECT pg_sleep(0)`);
+    return ok(SENT);
   }
 
-  const code = newSignInCode();
-  const expiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60_000).toISOString();
-
   await db.transaction(async (tx) => {
-    // Any earlier unused code stops working the moment a new one is sent.
+    await tx.execute(sql`SELECT id FROM drivers WHERE id = ${driver.id} FOR UPDATE`);
+
+    // Deliberately the most recent code of any kind, not the most recent
+    // *live* one. A code that has been used or burned through its attempt
+    // limit still starts the clock — otherwise five wrong guesses would clear
+    // the cooldown and let an attacker pull a fresh code immediately.
+    const recent = await tx
+      .select({ createdAt: driverSignInCodes.createdAt })
+      .from(driverSignInCodes)
+      .where(eq(driverSignInCodes.driverId, driver.id))
+      .orderBy(desc(driverSignInCodes.createdAt))
+      .limit(1);
+
+    const last = recent[0]?.createdAt;
+    if (last && Date.now() - new Date(last).getTime() < RESEND_COOLDOWN_SECONDS * 1000) return;
+
+    const channel = driver.phone ? 'sms' : driver.email ? 'email' : null;
+    const recipient = driver.phone ?? driver.email;
+    if (!channel || !recipient) {
+      // On the roster but unreachable. The office has to fix the record — but
+      // saying so here would tell an anonymous caller this driver exists.
+      console.warn(`driver ${driver.id} has no phone or email on file and cannot be sent a code`);
+      return;
+    }
+
+    const code = newSignInCode();
+    const expiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60_000).toISOString();
+
+    // Any earlier unused code stops working the moment a new one is sent; the
+    // partial unique index makes "one live code" the database's rule.
     await tx
       .update(driverSignInCodes)
       .set({ consumedAt: new Date().toISOString() })
-      .where(and(eq(driverSignInCodes.driverId, driver.id), isNull(driverSignInCodes.consumedAt)));
+      .where(and(eq(driverSignInCodes.driverId, driver.id), sql`consumed_at IS NULL`));
 
-    await tx.insert(driverSignInCodes).values({
-      driverId: driver.id,
-      codeHash: hashSecret(code),
-      sentTo: recipient,
-      expiresAt,
-    });
+    const [row] = await tx
+      .insert(driverSignInCodes)
+      .values({ driverId: driver.id, codeHash: hashCode(code), sentTo: recipient, expiresAt })
+      .returning({ id: driverSignInCodes.id });
 
     await tx.insert(notifications).values({
       channel,
@@ -116,9 +126,10 @@ export async function POST(request: Request) {
       // Plain punctuation and no link: some carrier gateways treat a link as
       // spam and start dropping everything from the sender.
       body: `${code} is your Amazing Grace sign-in code. It expires in ${CODE_TTL_MINUTES} minutes.`,
-      dedupeKey: `driver-sign-in:${driver.id}:${expiresAt}`,
+      // Keyed on the code row, so two codes can never collide on this.
+      dedupeKey: `driver-sign-in:${row!.id}`,
     });
   });
 
-  return ok({ sent: true, via: channel, sentTo: mask(recipient, channel) });
-}
+  return ok(SENT);
+});

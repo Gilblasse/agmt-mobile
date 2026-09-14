@@ -20,5 +20,19 @@ if (before > 0 && !source.includes("from './citext'")) {
   );
 }
 
+// The real schema has exactly these five citext columns (drivers.name,
+// drivers.email, office_users.email, passengers.name, vehicles.label). If
+// drizzle-kit changes how it reports an unparseable type, this patch would
+// otherwise no-op silently and leave name matching case-sensitive.
+const EXPECTED = 5;
+if (before !== EXPECTED) {
+  console.error(
+    `citext: expected ${EXPECTED} unparsed citext columns, found ${before}. ` +
+      `Either the schema changed — update EXPECTED — or drizzle-kit changed its output ` +
+      `and this patch no longer applies. Not writing.`,
+  );
+  process.exit(1);
+}
+
 fs.writeFileSync(file, source);
-console.log(`citext: replaced ${before} unknown() column${before === 1 ? '' : 's'}`);
+console.log(`citext: replaced ${before} unknown() columns`);
