@@ -26,13 +26,13 @@ export const POST = withResult(async (request: Request) => {
   const result = await drainOutbox();
   // Worth a line in the log even when idle: "the worker is running and the
   // provider is still unconfigured" is the thing someone will need to know.
-  if (result.claimed > 0 || result.expired > 0) {
+  if (result.claimed > 0 || result.expired > 0 || result.settled > 0) {
     console.log(
       // "accepted", not "delivered": the provider has them. Confirmation comes
       // later on a status callback, if one is configured.
       `[outbox] claimed ${result.claimed}, accepted ${result.accepted}, ` +
         `retrying ${result.failed}, abandoned ${result.abandoned}, ` +
-        `expired ${result.expired} (${result.provider})`,
+        `expired ${result.expired}, settled by asking ${result.settled} (${result.provider})`,
     );
   }
   // These three are not statistics. Each one means somebody has to do

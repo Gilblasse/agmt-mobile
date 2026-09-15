@@ -106,13 +106,17 @@ facts it used to conflate:
 | `abandoned` | Given up on — the number cannot be texted, or the message was no longer worth sending. |
 | `unresolved` | **Somebody has to look.** The request reached Twilio and the answer did not come back, and asking Twilio what it has did not answer either. Sending it again might text the driver twice; giving up might text them not at all. Nothing retries it. |
 
-A message only ever gets past `accepted` if `TWILIO_STATUS_CALLBACK_URL` is
-set to this deployment's public URL, so Twilio has somewhere to report to.
-Reports are rejected unless they carry Twilio's signature for that exact URL.
-Without a callback, every message stops at `accepted` — the drain counts how
-many have been sitting there for over fifteen minutes and says so, because a
-number that keeps climbing means either no reports are arriving or the
-carrier is filtering the messages.
+A message gets past `accepted` in one of two ways. The cheap one is Twilio
+posting to `TWILIO_STATUS_CALLBACK_URL` — set it to this deployment's public
+URL; reports are rejected unless they carry Twilio's signature for that exact
+URL. The other is the drain *asking*: any message accepted more than a minute
+ago with no report is looked up on Twilio directly, up to twenty per drain,
+and settled through the same code path the callback uses. That is what made
+the first real message this system sent visible — the carrier refused it five
+seconds after acceptance, and on a machine with no public address the queue
+learned it by asking. The drain still counts messages unconfirmed for over
+fifteen minutes and says so; a number that keeps climbing means the provider
+cannot be asked either.
 
 The drain's log is where an outage shows up. Three lines mean act now:
 

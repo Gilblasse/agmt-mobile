@@ -1,7 +1,7 @@
 import parsePhoneNumber, { isSupportedCountry } from 'libphonenumber-js';
 import type { CountryCode } from 'libphonenumber-js';
 import { masked } from './mask';
-import type { Message, Sender, Sent } from './sender';
+import type { Checked, Message, Sender, Sent } from './sender';
 
 /**
  * Sends text messages through Twilio.
@@ -110,6 +110,8 @@ const NOT_THIS_MESSAGE = new Set([
   30001, // queue overflow
   30002, // the account is suspended
   30034, // US A2P 10DLC: this number has no approved campaign — days of registration, not a retry
+  30032, // a toll-free From number that has not passed toll-free verification — same story
+  21608, // a trial account can only text numbers verified in the console
 ]);
 
 /**
@@ -120,13 +122,21 @@ const NOT_THIS_MESSAGE = new Set([
  * all: the driver texted STOP, every future code will be refused the same way,
  * and until somebody talks to them they can never sign in again.
  */
-const IN_PLAIN_WORDS: Record<number, string> = {
+export const IN_PLAIN_WORDS: Record<number, string> = {
   21211: 'that is not a phone number Twilio will take.',
   21401: 'that is not a phone number Twilio will take.',
   21610: 'this driver replied STOP to a text, so Twilio will not send to them. Until they text START back, no code can reach them and they cannot sign in. Somebody has to tell them.',
   21614: 'that number is a landline and cannot receive texts.',
   21602: 'the message had no text in it.',
   21617: 'the message was too long to send.',
+  // Not permanent — these are the account's to fix — but they are the ones
+  // somebody in the office has to act on, so they need to be readable.
+  30032: 'our toll-free number has not passed toll-free verification, so US carriers refuse everything from it. Submit the verification in the Twilio console (Phone Numbers → Active numbers → Regulatory Information). Nothing will be delivered until it is approved. This was the reason the first real message this system sent did not arrive.',
+  30034: 'our number is not registered to an approved A2P 10DLC campaign, so US carriers refuse messages from it. Register in the Twilio console; it takes days.',
+  21608: 'the Twilio account is still a trial, which can only text numbers verified in its console. Upgrade the account, or verify this number.',
+  21408: 'texting this country is switched off for the Twilio account (Messaging → Settings → Geo Permissions).',
+  21606: 'our sending number is not an SMS-capable number on this Twilio account.',
+  20003: 'Twilio refused our credentials. TWILIO_AUTH_TOKEN is wrong or has been rotated.',
 };
 
 /** A Messaging Service SID, as opposed to an alphanumeric sender ID like `MGTransport`. */
@@ -291,9 +301,42 @@ export function twilioSender(config: TwilioConfig): Sender {
       }
 
       // Accepted, queued, sending, sent, delivered. Only a status callback
-      // turns any of these into a confirmed delivery, so say only what is
-      // known: Twilio has it, and here is its reference for it.
+      // — or asking — turns any of these into a confirmed delivery, so say
+      // only what is known: Twilio has it, and here is its reference for it.
       return { accepted: true, reference: typeof body?.sid === 'string' ? body.sid : null };
+    },
+
+    /**
+     * Asks Twilio what became of a message it accepted.
+     *
+     * The status callback is the cheap way to learn this, and it needs a
+     * public address to post to. Without one — a developer's machine, a
+     * deployment behind a firewall, a callback URL nobody configured — the
+     * row would sit at `accepted` for ever while Twilio already knew. The
+     * first real message this system sent was refused by the carrier five
+     * seconds after acceptance, and the queue found out only because it asked.
+     */
+    async check(reference: string): Promise<Checked> {
+      if (!/^[A-Za-z0-9]{34}$/.test(reference)) {
+        return { known: false, error: `${reference} is not a Twilio message reference.` };
+      }
+      let response: Response;
+      try {
+        response = await call(
+          new URL(`/2010-04-01/Accounts/${config.accountSid}/Messages/${reference}.json`, base).toString(),
+          { method: 'GET', headers: authHeaders(), signal: AbortSignal.timeout(timeoutMs) },
+        );
+      } catch (error) {
+        return { known: false, error: `Could not ask Twilio: ${describe(error)}` };
+      }
+      const body = await readBody(response);
+      if (!response.ok || typeof body?.status !== 'string') {
+        return {
+          known: false,
+          error: `Twilio would not say (${numeric(body?.code) ?? response.status}): ${redactNumbers(body?.message ?? '')}`,
+        };
+      }
+      return { known: true, status: body.status, errorCode: numeric(body.error_code) ?? null };
     },
   };
 

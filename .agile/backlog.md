@@ -111,9 +111,9 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 - **Schedule the drain** — nothing calls `POST /api/jobs/drain-outbox` yet, so
   in a real deployment a queued sign-in code would sit there. One cron entry.
 
-- **Send one real message** — needs the owner's Twilio account. Everything up
-  to the network is proven; nothing past it is. Blocked on an account, which
-  is a business decision with a bill attached and is not mine to make.
+- ~~Send one real message~~ — **done.** Accepted by Twilio in one drain,
+  refused by the carrier five seconds later (30032, toll-free number not
+  verified), and the queue learned that by asking. See `verification.md`.
 
 - **A driver's own sign-in codes are not the only thing in the queue.** Trip
   alerts (`docs/07:178-182`) are all `[must]` and none are queued yet — the
@@ -121,11 +121,14 @@ Ordered. Priorities follow `docs/07-feature-checklist.md`, phases follow
 
 ## Next — raised by the second Twilio review
 
-- **Reconcile messages stuck at `accepted`** — the drain now counts and warns
-  about messages the provider took and never reported on, which stops it being
-  silent, but nothing resolves them. A job that asks Twilio for the status of
-  each is the real answer, and the same lookup the ambiguous-timeout path
-  already uses.
+- **Toll-free verification for +1 855 710 6104** — *owner action, in the
+  Twilio console.* The first real message was accepted by Twilio and refused
+  by the carrier (30032) because the number is unverified. Nothing sends until
+  this is approved, and the code cannot do it. Phone Numbers → Active numbers →
+  Regulatory Information → submit Toll-Free Verification.
+- **Upgrade the Twilio account off trial** — *owner action.* A trial can only
+  text numbers verified in the console (21608) and pastes a notice in front of
+  every message.
 - **Somewhere for the office to see `unresolved` rows** — a message nobody
   knows the fate of is now recorded plainly, but the only place to read it is
   the database. `getOutbox` and `retryNotification` from the contract need

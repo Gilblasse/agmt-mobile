@@ -89,7 +89,8 @@ describe('taking a delivery report from Twilio', () => {
     const id = await accepted('SM_landline');
     await post({ MessageSid: 'SM_landline', MessageStatus: 'failed', ErrorCode: '21614' });
     const row = await stateOf(id);
-    assert.match(row.last_error, /cannot be texted/);
+    // In plain words, the same words the Messages API path uses.
+    assert.match(row.last_error, /landline.*cannot receive texts/);
     // `abandoned`, the same as when the Messages API says so up front. Two
     // states for one fact would mean reading the queue by which route the bad
     // news arrived.

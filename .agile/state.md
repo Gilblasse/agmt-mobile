@@ -24,9 +24,16 @@ the same code twice. Both reproduced live under 156 passing tests. All fixed
 and re-verified against the reviewer's own attacks
 (`review-findings.md`). **174 tests.**
 
-**Next action:** an email provider (an unmet `[must]`, see the backlog),
-schedule the drain, and one real message through a real Twilio account. Until
-a message actually leaves, no driver can sign in.
+**The first real message has been sent.** Accepted by Twilio, refused by the
+carrier five seconds later — 30032, the toll-free sender is not verified. The
+queue learned that by asking Twilio, through a read-back built because of it.
+
+**Next action for the owner:** submit Toll-Free Verification for
++1 855 710 6104 in the Twilio console, and upgrade the account off trial.
+Nothing is delivered until the first is approved; no code change can do it.
+
+**Next action for the build:** an email provider (an unmet `[must]`), and
+schedule the drain.
 
 **Resolved:** the owner confirmed the repo is public as-is, knowing it carries
 the live Apps Script deployment URL and spreadsheet IDs. Rotating that

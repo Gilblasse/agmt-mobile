@@ -49,7 +49,7 @@ async function queue(body = 'hello', sendAfter = "now() - interval '1 second'"):
   return row!.id as string;
 }
 const stateOf = async (id: string) =>
-  (await sql`SELECT state, attempts, last_error, sent_at, send_after, provider_ref FROM notifications WHERE id = ${id}`)[0]!;
+  (await sql`SELECT state, attempts, last_error, sent_at, send_after, provider_ref, delivered_at FROM notifications WHERE id = ${id}`)[0]!;
 
 beforeEach(async () => {
   // The drain is global by design — it sends whatever is due, whoever queued
@@ -241,13 +241,20 @@ describe('draining the outbox', () => {
     // asserting on send order with a batch of two was only ever passing by
     // accident. What matters is that a message is never passed over: queue
     // one behind another and the older one goes on the earlier drain.
-    await drainOutbox(1);
-    await drainOutbox(1);
+    const one = await drainOutbox(1);
+    const two = await drainOutbox(1);
 
     // Only this test's own messages: asserting on everything the sender saw
     // made this flake whenever another suite left a row behind.
     const mine = seen.map((m) => m.body).filter((b) => b === 'first' || b === 'second');
-    assert.deepEqual(mine, ['first', 'second']);
+    // Failed once in ten full-suite runs on a Windows Docker host and could
+    // not be reproduced in the next four; if it happens again, this says what
+    // each drain actually did.
+    assert.deepEqual(
+      mine,
+      ['first', 'second'],
+      `drains claimed ${one.claimed} then ${two.claimed}; sender saw ${JSON.stringify(seen.map((m) => m.body))}`,
+    );
   });
 });
 
@@ -605,5 +612,104 @@ describe('the one setting the whole scheme rests on', () => {
     assert.equal(readLeaseSeconds('120'), 120);
     assert.equal(readLeaseSeconds(undefined), 120);
     assert.equal(readLeaseSeconds(''), 120);
+  });
+});
+
+describe('asking the provider what became of a message', () => {
+  /** A sender that accepts everything and answers questions however the test says. */
+  function askable(answer: (reference: string) => { known: true; status: string; errorCode?: number | null } | { known: false; error: string }) {
+    const asked: string[] = [];
+    useSender({
+      describe: () => 'askable sender',
+      async send() {
+        return { accepted: true, reference: 'SM_ref' };
+      },
+      async check(reference) {
+        asked.push(reference);
+        return answer(reference);
+      },
+    });
+    return asked;
+  }
+  /** A message the provider took a while ago and never reported on. */
+  async function acceptedAgo(reference: string | null, seconds = 120): Promise<string> {
+    const [row] = await sql.unsafe(
+      `INSERT INTO notifications (channel, recipient, body, state, provider_ref, sent_at)
+       VALUES ('sms', '8455550000', 'quiet', 'accepted', $1, now() - make_interval(secs => $2)) RETURNING id`,
+      [reference, seconds],
+    );
+    return row!.id as string;
+  }
+
+  it('learns a failure the callback never delivered, in the same words', async () => {
+    // The first real message this system sent: refused by the carrier five
+    // seconds after acceptance (30032, toll-free number not verified), while
+    // the row sat at `accepted` on a machine no callback could reach.
+    const id = await acceptedAgo('SM_refused');
+    const asked = askable(() => ({ known: true, status: 'undelivered', errorCode: 30032 }));
+
+    const result = await drainOutbox();
+    assert.deepEqual(asked, ['SM_refused']);
+    assert.equal(result.settled, 1);
+    const row = await stateOf(id);
+    assert.equal(row.state, 'failed');
+    assert.match(row.last_error, /undelivered \(30032\)/);
+  });
+
+  it('learns a delivery the same way', async () => {
+    const id = await acceptedAgo('SM_arrived');
+    askable(() => ({ known: true, status: 'delivered' }));
+    await drainOutbox();
+    const row = await stateOf(id);
+    assert.equal(row.state, 'sent');
+    assert.ok(row.delivered_at);
+  });
+
+  it('gives up on a number that can never be texted, as the callback would', async () => {
+    const id = await acceptedAgo('SM_landline');
+    askable(() => ({ known: true, status: 'failed', errorCode: 21614 }));
+    await drainOutbox();
+    assert.equal((await stateOf(id)).state, 'abandoned');
+  });
+
+  it('leaves a message that is still on its way alone', async () => {
+    const id = await acceptedAgo('SM_moving');
+    askable(() => ({ known: true, status: 'sending' }));
+    const result = await drainOutbox();
+    assert.equal(result.settled, 0);
+    assert.equal((await stateOf(id)).state, 'accepted');
+  });
+
+  it('does not pester the provider about a message accepted moments ago', async () => {
+    const id = await acceptedAgo('SM_fresh', 5);
+    const asked = askable(() => ({ known: true, status: 'delivered' }));
+    await drainOutbox();
+    assert.deepEqual(asked, [], 'a report may still be on its way');
+    assert.equal((await stateOf(id)).state, 'accepted');
+  });
+
+  it('cannot ask about a message with no reference, and says so in the count', async () => {
+    const id = await acceptedAgo(null, 20 * 60);
+    const asked = askable(() => ({ known: true, status: 'delivered' }));
+    const result = await drainOutbox();
+    assert.deepEqual(asked, []);
+    assert.equal((await stateOf(id)).state, 'accepted');
+    assert.ok(result.unconfirmed >= 1, 'still unconfirmed, and visibly so');
+  });
+
+  it('keeps asking when the provider would not say', async () => {
+    const id = await acceptedAgo('SM_shy');
+    askable(() => ({ known: false, error: 'Twilio would not say (503)' }));
+    const result = await drainOutbox();
+    assert.equal(result.settled, 0);
+    assert.equal((await stateOf(id)).state, 'accepted', 'not guessed either way');
+  });
+
+  it('works without a provider that can be asked', async () => {
+    // A sender with no check(): the callback is the only way, as before.
+    await acceptedAgo('SM_unaskable');
+    delivers();
+    const result = await drainOutbox();
+    assert.equal(result.settled, 0);
   });
 });

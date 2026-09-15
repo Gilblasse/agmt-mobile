@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import { db } from '@/lib/db';
 import { OFFICE_TIME_ZONE } from '@/lib/office-clock';
 import { sender, type Channel } from './sender';
+import { settle } from './settle';
 
 /**
  * Drains the notification outbox.
@@ -52,6 +53,10 @@ const SEND_TIMEOUT_MS = Math.max(1_000, (CLAIM_LEASE_SECONDS * 1000) / 4);
 const CONCURRENCY = 4;
 /** After this long with no delivery report, an `accepted` message is worth saying out loud. */
 const CONFIRMATION_WINDOW_MINUTES = 15;
+/** After this long with no delivery report, ask the provider directly. */
+const ASK_AFTER_SECONDS = 60;
+/** How many accepted messages to ask about per drain. Bounded, like everything else here. */
+const ASK_AT_MOST = 20;
 
 export function readLeaseSeconds(raw: string | undefined): number {
   if (raw === undefined || raw === '') return 120;
@@ -92,6 +97,8 @@ export type DrainResult = {
    * delivery reports are arriving.
    */
   unconfirmed: number;
+  /** Accepted messages whose outcome was learned by asking the provider. */
+  settled: number;
   provider: string;
   /** Set when nothing can be sent at all. The reason, in the provider's words. */
   providerProblem: string | null;
@@ -143,6 +150,45 @@ async function expireOverdue(): Promise<number> {
   return rows.length;
 }
 
+/**
+ * Asks the provider what became of messages it accepted and never reported on.
+ *
+ * The status callback is the normal way to learn this, and it needs a public
+ * address. This is the other way, and it exists because of the first real
+ * message this system sent: the carrier refused it within five seconds, Twilio
+ * knew, and the row sat at `accepted` on a machine no callback could reach.
+ * The outcome is applied through the same `settle()` the callback uses, so
+ * the queue reads identically whichever way the news arrived.
+ *
+ * A row with no reference can never be asked about; it stays `accepted` and
+ * is counted in `unconfirmed`, which is the honest answer for it.
+ */
+async function askAboutAccepted(): Promise<number> {
+  const ask = sender().check;
+  if (!ask) return 0;
+
+  const rows = (await db.execute(sql`
+    SELECT provider_ref AS reference FROM notifications
+    WHERE state = 'accepted' AND provider_ref IS NOT NULL AND delivered_at IS NULL
+      AND sent_at < now() - make_interval(secs => ${ASK_AFTER_SECONDS})
+    ORDER BY sent_at
+    LIMIT ${ASK_AT_MOST}
+  `)) as unknown as { reference: string }[];
+
+  let settled = 0;
+  for (const { reference } of rows) {
+    let answer;
+    try {
+      answer = await withTimeout(ask(reference), SEND_TIMEOUT_MS);
+    } catch (error) {
+      answer = { known: false as const, error: String(error) };
+    }
+    if (!answer.known) continue; // still unconfirmed; it will be asked again next time
+    if (await settle(reference, answer.status, answer.errorCode)) settled++;
+  }
+  return settled;
+}
+
 /** Messages the provider took a while ago and has never reported on. */
 async function countUnconfirmed(): Promise<number> {
   const rows = (await db.execute(sql`
@@ -170,6 +216,7 @@ export async function drainOutbox(limit = 20): Promise<DrainResult> {
     unresolved: 0,
     recovered: 0,
     unconfirmed: 0,
+    settled: 0,
     provider: sender().describe(),
     providerProblem: null,
   };
@@ -206,6 +253,7 @@ export async function drainOutbox(limit = 20): Promise<DrainResult> {
   });
   await Promise.all(workers);
 
+  result.settled = await askAboutAccepted();
   result.unconfirmed = await countUnconfirmed();
   return result;
 }

@@ -508,3 +508,34 @@ function unreachable() {
     send: async () => ({ accepted: false as const, error: 'no' }),
   };
 }
+
+describe('asking what became of a message', () => {
+  const twilio = (fetchImpl: typeof fetch) =>
+    twilioSender({ accountSid: 'AC', authToken: 't', from: '+15550001111', fetch: fetchImpl });
+  const reference = 'SM' + 'a'.repeat(32);
+
+  it('reads the status and the error code back', async () => {
+    const { calls, fetchImpl } = fakeTwilio(
+      new Response(JSON.stringify({ sid: reference, status: 'undelivered', error_code: 30032 }), { status: 200 }),
+    );
+    const answer = await twilio(fetchImpl).check!(reference);
+    assert.deepEqual(answer, { known: true, status: 'undelivered', errorCode: 30032 });
+    assert.match(calls[0]!.url, new RegExp(`/Messages/${reference}\.json$`));
+    assert.match(calls[0]!.auth ?? '', /^Basic /);
+  });
+
+  it('says it does not know rather than guessing when Twilio will not answer', async () => {
+    const { fetchImpl } = fakeTwilio(refused(20003, 'authenticate', 401));
+    const answer = await twilio(fetchImpl).check!(reference);
+    assert.equal(answer.known, false);
+  });
+
+  it('refuses to put a stored value it does not recognise into a URL', async () => {
+    // provider_ref is a column; a value that is not a message SID must not
+    // become part of a request path against the account.
+    const { calls, fetchImpl } = fakeTwilio(queued());
+    const answer = await twilio(fetchImpl).check!('../Accounts/AC_other/Messages');
+    assert.equal(answer.known, false);
+    assert.equal(calls.length, 0);
+  });
+});

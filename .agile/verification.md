@@ -366,13 +366,56 @@ Cloned to Windows 11 and run there, which the Linux sandbox could not do.
 - **Both mobile bundles export** (Android and iOS Hermes bytecode, 1.5 MB
   each), as in CI.
 
-## Not verified
+## The first real message
+
+Sent from the owner's Windows machine through the owner's Twilio account
+(trial, toll-free sender), to the one number the trial account is allowed to
+text, through the real code path and nothing else:
+
+```
+sign-in  → {"ok":true,"data":{"sent":true}}      state=pending, expires_at set
+drain    → claimed 1, accepted 1                   state=accepted
+           provider_ref=SMa301d93ecf1902d70f5698eaa25ef532
+Twilio   → t+5s  status=undelivered  error_code=30032
+           "Sent from your Twilio trial account - 532331 is your Amazing…"
+```
+
+**30032: Toll-Free Number Has Not Been Verified.** Twilio accepted the
+message and the carrier refused it five seconds later, exactly as
+`.env.example` warned before the send. This is an owner action in the Twilio
+console and nothing in the code can change it. The message body was correct,
+with the trial notice Twilio pastes in front of it.
+
+Two things this proved that no stand-in could:
+
+- **Accepted is not delivered, in the real world.** The drain reported
+  `accepted: 1`, truthfully. Had the adapter still read `201` as delivery,
+  this would have been recorded as a success and nobody would have known a
+  driver received nothing.
+- **The queue can learn the outcome by asking.** No callback can reach this
+  machine. The drain's new read-back looked the message up on Twilio and moved
+  the row `accepted → failed | Twilio reported undelivered (30032): our
+  toll-free number has not passed toll-free verification…` — against the real
+  message, not a fake. That read-back was built in this session because of
+  this message, and the test for it uses this exact code.
+
+**A hazard found while doing it.** The live-configured server and the test
+suite shared the test database. The suite's `beforeEach` emptied the table
+(destroying the real message's row — recreated from its SID for the read-back
+above), and a later manual drain pushed a *test fixture's* fake 845-555 number
+at real Twilio, which refused it (21608, trial account). No message left, but
+the rule is now written down: a server with real provider credentials never
+points at a database the test suite also uses.
+
+
 
 - `expo-sqlite` cold-start with a corrupt row — no offline queue exists yet.
 - Anything needing a device or simulator. The bundles export; they have not
   been launched on a phone.
-- A real Twilio account: a real send, and a real status callback arriving over
-  the network. The signature scheme now agrees with Twilio's own SDK, which is
-  as close as it gets without a genuine request.
+- A real *delivery*. The real send happened and was refused by the carrier for
+  a reason only the owner can fix (toll-free verification). A real status
+  callback arriving over the network is also unverified — this machine has no
+  public address — though the signature scheme agrees with Twilio's own SDK,
+  and the read-back now covers the same ground without one.
 - Email delivery of a sign-in code. There is no provider, which is an unmet
   `[must]` (`docs/07-feature-checklist.md:182`), not a gap in testing.

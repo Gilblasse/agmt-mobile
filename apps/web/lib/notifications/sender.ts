@@ -46,9 +46,25 @@ export type Sent =
   | { accepted: true; reference?: string | null }
   | { accepted: false; error: string; permanent?: boolean; cause?: 'provider' | 'unresolved' };
 
+/**
+ * What the provider says became of a message it accepted earlier.
+ *
+ * `status` is the provider's own word for it (`delivered`, `undelivered`,
+ * `queued`…), passed through to `settle()` unchanged so the queue reads the
+ * same whether the news came by callback or by asking.
+ */
+export type Checked =
+  | { known: true; status: string; errorCode?: string | number | null }
+  | { known: false; error: string };
+
 export interface Sender {
   describe(): string;
   send(message: Message): Promise<Sent>;
+  /**
+   * Asks the provider what became of `reference`. Optional: a provider with
+   * no way to ask leaves accepted messages to the status callback alone.
+   */
+  check?(reference: string): Promise<Checked>;
 }
 
 /**
@@ -156,6 +172,7 @@ function fromEnvironment(env: SendingEnv = process.env): Sender {
   const described = `sms: ${sms.describe()}; email: none`;
   return {
     describe: () => described,
+    ...(sms.check ? { check: (reference: string) => sms.check!(reference) } : {}),
     async send(message) {
       if (message.channel !== 'sms') {
         // Permanent, not `provider`. There is no email service being waited on

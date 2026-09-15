@@ -1,6 +1,4 @@
-import { sql } from 'drizzle-orm';
-import { db } from '@/lib/db';
-import { isPermanentCode } from '@/lib/notifications/twilio';
+import { settle } from '@/lib/notifications/settle';
 import { signatureMatches } from '@/lib/notifications/twilio-signature';
 
 /**
@@ -18,14 +16,6 @@ import { signatureMatches } from '@/lib/notifications/twilio-signature';
  * — form-encoded in, a bare status code out — rather than the `Result`
  * envelope the rest of the API uses.
  */
-
-/** Twilio's terminal statuses, and what each one means for the queue. */
-const OUTCOME = {
-  delivered: 'sent',
-  undelivered: 'failed',
-  failed: 'failed',
-  canceled: 'abandoned',
-} as const;
 
 export async function POST(request: Request): Promise<Response> {
   const authToken = process.env.TWILIO_AUTH_TOKEN;
@@ -45,39 +35,9 @@ export async function POST(request: Request): Promise<Response> {
   const status = fields.get('MessageStatus') ?? fields.get('SmsStatus');
   if (!reference || !status) return new Response(null, { status: 400 });
 
-  let outcome = OUTCOME[status as keyof typeof OUTCOME];
-  // queued, sending, sent, accepted, scheduled: on their way. Nothing settled
-  // yet, and nothing to record.
-  if (!outcome) return new Response(null, { status: 204 });
-
-  const errorCode = fields.get('ErrorCode');
-  const unsendable = isPermanentCode(errorCode);
-  const detail = errorCode
-    ? `Twilio reported ${status} (${errorCode})${unsendable ? ' — this number cannot be texted' : ''}.`
-    : `Twilio reported ${status}.`;
-  // A number that can never be texted is `abandoned`, the same as when the
-  // Messages API says so up front. Two states for one fact would have meant
-  // the office reading the queue by which route the bad news arrived.
-
-  // `undelivered` and `failed` stay put rather than going back in the queue.
-  // Twilio has already tried; re-sending the same message risks a second copy
-  // arriving if the carrier's report was wrong. A driver waiting on a sign-in
-  // code asks for another one, which queues a fresh code — that path exists,
-  // is rate-limited, and cannot double-send.
-  //
-  // `state = 'accepted'` in the WHERE is what makes this safe to receive more
-  // than once and out of order: Twilio retries callbacks, and a `sent`
-  // callback can arrive after `delivered`. Only a row still waiting on an
-  // outcome can be moved by one.
-  if (outcome === 'failed' && unsendable) outcome = 'abandoned';
-
-  await db.execute(sql`
-    UPDATE notifications
-    SET state = ${outcome}::outbox_state,
-        delivered_at = CASE WHEN ${outcome} = 'sent' THEN now() ELSE delivered_at END,
-        last_error = CASE WHEN ${outcome} = 'sent' THEN NULL ELSE ${detail} END
-    WHERE provider_ref = ${reference} AND state = 'accepted'
-  `);
+  // queued, sending, sent, accepted, scheduled settle nothing; settle() says
+  // so by returning null, and there is nothing to record.
+  await settle(reference, status, fields.get('ErrorCode'));
 
   // A reference we do not know is not an error worth retrying: it may be a
   // message this database never queued. Take it and say nothing.

@@ -235,6 +235,19 @@ own reference. Where no callback URL is configured a message stops at
 `accepted` and the startup line says so in words — the honest answer, rather
 than a state that claims more than is known.
 
+## The queue asks the provider, rather than only waiting to be told
+
+The status callback is the cheap way to learn what became of a message, and
+it needs a public address. The first real message this system sent — from the
+owner's Windows machine, with no address Twilio could reach — was refused by
+the carrier five seconds after acceptance, and the row sat at `accepted`
+while Twilio already knew. So the drain now asks: any message accepted more
+than a minute ago with no report is looked up on Twilio directly, bounded to
+twenty per drain, and settled through the *same* `settle()` the callback
+uses, so the queue reads identically whichever way the news arrived. A row
+with no provider reference can never be asked about; it stays `accepted` and
+is counted, which is the honest answer for it.
+
 ## A phone number is parsed, not assembled from digits
 
 The first version counted digits and glued a country code on: ten digits got
